@@ -176,7 +176,9 @@ Engine_Sediment : CroneEngine {
             voices.do({ arg synth, i;
                 if(synth.notNil, { synth.set(\gate, 0); voices[i] = nil });
             });
-            Buffer.read(context.server, path, action: { arg newBuf;
+            // force mono regardless of the source file's channel count —
+            // BufRd.ar(1, ...) in \sediment_voice requires a 1-channel buffer
+            Buffer.readChannel(context.server, path, channels: [0], action: { arg newBuf;
                 ("DEBUG buf_load Buffer.read done: frames=" ++ newBuf.numFrames
                     ++ " chans=" ++ newBuf.numChannels ++ " sr=" ++ newBuf.sampleRate).postln;
                 buffer.free;
