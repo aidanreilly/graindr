@@ -36,6 +36,9 @@ Engine_Sediment : CroneEngine {
             var sig = Sediment.ar(inMono, inMono, pitch, position, scatter,
                                   bloom, drift, feedback, dryWet, freeze, mode);
             var env = EnvGen.kr(Env.asr(0.01, 1, 0.1), gate, doneAction: 2);
+            // DEBUG: probe dry (inMono) vs post-Sediment mix amplitude
+            Amplitude.kr(inMono).poll(2, \DEBUG_dryAmp);
+            Amplitude.kr(sig[0]).poll(2, \DEBUG_mixAmp);
             Out.ar(out, Balance2.ar(sig[0], sig[1], pan, amp * env));
         }).add;
 
@@ -169,14 +172,18 @@ Engine_Sediment : CroneEngine {
 
         this.addCommand("buf_load", "s", { arg msg;
             var path = msg[1].asString;
+            ("DEBUG buf_load received: " ++ path).postln;
             voices.do({ arg synth, i;
                 if(synth.notNil, { synth.set(\gate, 0); voices[i] = nil });
             });
             Buffer.read(context.server, path, action: { arg newBuf;
+                ("DEBUG buf_load Buffer.read done: frames=" ++ newBuf.numFrames
+                    ++ " chans=" ++ newBuf.numChannels ++ " sr=" ++ newBuf.sampleRate).postln;
                 buffer.free;
                 buffer = newBuf;
                 Crone.remoteAddr.sendMsg("/sediment/buf_info",
                     newBuf.numFrames, newBuf.sampleRate);
+                "DEBUG buf_load sent /sediment/buf_info, calling sendWaveform".postln;
                 this.sendWaveform();
             });
         });
@@ -196,7 +203,10 @@ Engine_Sediment : CroneEngine {
     }
 
     sendWaveform {
+        "DEBUG sendWaveform: calling loadToFloatArray".postln;
         buffer.loadToFloatArray(action: { arg data;
+            "DEBUG sendWaveform: loadToFloatArray callback fired, data.size=".postln;
+            data.size.postln;
             var numChans = buffer.numChannels;
             var monoFrames = data.size div: numChans;
             var segSize = (monoFrames / 128).asInteger.max(1);
