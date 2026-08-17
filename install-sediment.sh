@@ -19,22 +19,18 @@ cleanup() {
     echo "Cleaning up build directory..."
     rm -rf "$WORK_DIR"
 }
+trap cleanup EXIT
 
 echo "==> Checking build dependencies..."
 
 missing=()
 for pkg in cmake g++ supercollider-dev; do
-    cmd="$pkg"
-    if [ "$pkg" = "supercollider-dev" ]; then
-        cmd="dpkg"
-    fi
-
     if [ "$pkg" = "supercollider-dev" ]; then
         if ! dpkg -s supercollider-dev >/dev/null 2>&1; then
             missing+=("$pkg")
         fi
     else
-        if ! command -v "$cmd" >/dev/null 2>&1; then
+        if ! command -v "$pkg" >/dev/null 2>&1; then
             missing+=("$pkg")
         fi
     fi
@@ -77,10 +73,13 @@ if [ -z "$SC_PATH" ]; then
         echo "    Could not detect SC version, defaulting to 3.14.1"
     fi
 
-    git clone --depth 1 --branch "$sc_tag" \
-        https://github.com/supercollider/supercollider.git "$SC_SRC_DIR" 2>/dev/null \
-    || git clone --depth 1 \
-        https://github.com/supercollider/supercollider.git "$SC_SRC_DIR"
+    rm -rf "$SC_SRC_DIR"
+    if ! git clone --depth 1 --branch "$sc_tag" \
+        https://github.com/supercollider/supercollider.git "$SC_SRC_DIR" 2>/dev/null; then
+        rm -rf "$SC_SRC_DIR"
+        git clone --depth 1 \
+            https://github.com/supercollider/supercollider.git "$SC_SRC_DIR"
+    fi
 
     SC_PATH="$SC_SRC_DIR"
 fi
@@ -110,9 +109,12 @@ mkdir -p "$SC_EXT_DIR"
 cmake --install "$BUILD_DIR"
 
 echo "==> Installed UGens:"
-find "$SC_EXT_DIR/Sediment" -name '*.so' -o -name '*.scx' 2>/dev/null || true
-
-cleanup
+found_files=$(find "$SC_EXT_DIR" \( -name '*.so' -o -name '*.scx' \) 2>/dev/null || true)
+if [ -n "$found_files" ]; then
+    echo "$found_files"
+else
+    echo "    Warning: no .so/.scx files found under $SC_EXT_DIR — install may have failed or used an unexpected layout."
+fi
 
 echo
 echo "Done. Restart SuperCollider to load the new UGens:"
