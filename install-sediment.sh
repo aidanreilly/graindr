@@ -43,19 +43,53 @@ if [ ${#missing[@]} -gt 0 ]; then
     sudo apt-get install -y --no-install-recommends "${missing[@]}"
 fi
 
+echo "==> Detecting SuperCollider version..."
+
+sc_version=$(dpkg -s supercollider-server 2>/dev/null \
+    | grep '^Version:' | awk '{print $2}' | sed 's/-.*//' || true)
+
+if [ -z "$sc_version" ]; then
+    sc_version=$(scsynth -v 2>&1 | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
+fi
+
+if [ -n "$sc_version" ]; then
+    echo "    Detected SC version: $sc_version"
+else
+    sc_version="3.14.1"
+    echo "    Could not detect SC version, defaulting to $sc_version"
+fi
+
 echo "==> Finding SuperCollider source headers..."
 
 SC_PATH=""
 SC_INCLUDE="/usr/include/SuperCollider"
 if [ -f "$SC_INCLUDE/plugin_interface/SC_PlugIn.h" ]; then
-    # Sediment's CMake expects SC_PATH/include/plugin_interface/SC_PlugIn.h,
-    # i.e. SC_PATH pointing at the root of a full SC source checkout. Debian's
-    # supercollider-dev package installs the same headers flat, one level up
-    # from that (no extra "include" nesting), so shim it with a symlink
-    # rather than cloning the whole SC source tree just for headers.
+    # Sediment's CMake expects SC_PATH/include/plugin_interface/SC_PlugIn.h
+    # *and* SC_PATH/SCVersion.txt, i.e. SC_PATH pointing at the root of a
+    # full SC source checkout. Debian's supercollider-dev package installs
+    # the headers flat, one level up from that (no extra "include" nesting),
+    # and ships no SCVersion.txt at all, so shim both rather than cloning
+    # the whole SC source tree just for headers.
     SC_SHIM_DIR="$WORK_DIR/sc-include-shim"
     mkdir -p "$SC_SHIM_DIR"
     ln -sfn "$SC_INCLUDE" "$SC_SHIM_DIR/include"
+
+    sc_major="${sc_version%%.*}"
+    sc_rest="${sc_version#*.}"
+    sc_minor="${sc_rest%%.*}"
+    sc_patch="${sc_rest#*.}"
+
+    cat > "$SC_SHIM_DIR/SCVersion.txt" <<EOF
+set(SC_VERSION_MAJOR ${sc_major})
+set(SC_VERSION_MINOR ${sc_minor})
+set(SC_VERSION_PATCH ${sc_patch})
+set(SC_VERSION_TWEAK "")
+set(SC_VERSION \${SC_VERSION_MAJOR}.\${SC_VERSION_MINOR}.\${SC_VERSION_PATCH}\${SC_VERSION_TWEAK})
+
+set(GIT_BRANCH not_a_git_checkout)
+set(GIT_COMMIT_HASH na)
+EOF
+
     SC_PATH="$SC_SHIM_DIR"
 fi
 
@@ -64,20 +98,7 @@ if [ -z "$SC_PATH" ]; then
     echo "    SC headers not found in system paths, fetching SC source..."
     mkdir -p "$WORK_DIR"
 
-    sc_version=$(dpkg -s supercollider-server 2>/dev/null \
-        | grep '^Version:' | awk '{print $2}' | sed 's/-.*//' || true)
-
-    if [ -z "$sc_version" ]; then
-        sc_version=$(scsynth -v 2>&1 | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
-    fi
-
-    sc_tag="Version-3.14.1"
-    if [ -n "$sc_version" ]; then
-        sc_tag="Version-${sc_version}"
-        echo "    Detected SC version: $sc_version"
-    else
-        echo "    Could not detect SC version, defaulting to 3.14.1"
-    fi
+    sc_tag="Version-${sc_version}"
 
     rm -rf "$SC_SRC_DIR"
     if ! git clone --depth 1 --branch "$sc_tag" \
