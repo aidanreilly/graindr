@@ -5,6 +5,7 @@ Engine_Sediment : CroneEngine {
     var <recSynth;
     var params;
     var spreadVal;
+    var matronAddr;
 
     *new { arg context, doneCallback;
         ^super.new(context, doneCallback);
@@ -14,6 +15,14 @@ Engine_Sediment : CroneEngine {
         voices = Array.fill(8, { nil });
         voiceVel = Array.fill(8, { 0.0 });
         spreadVal = 0.5;
+
+        // Crone.remoteAddr (port 8888) is matron's *internal* report channel —
+        // oracle.cc registers handlers only for specific /report/* and
+        // /crone/ready paths there, with no wildcard fallback, so custom
+        // paths sent to it are silently dropped by liblo. matron's generic
+        // OSC receiver that actually forwards to lua's osc.event listens on
+        // args_remote_port() instead, which defaults to 10111.
+        matronAddr = NetAddr("127.0.0.1", 10111);
 
         buffer = Buffer.alloc(context.server, 48000 * 60, 1);
 
@@ -183,7 +192,7 @@ Engine_Sediment : CroneEngine {
                     ++ " chans=" ++ newBuf.numChannels ++ " sr=" ++ newBuf.sampleRate).postln;
                 buffer.free;
                 buffer = newBuf;
-                Crone.remoteAddr.sendMsg("/sediment/buf_info",
+                matronAddr.sendMsg("/sediment/buf_info",
                     newBuf.numFrames, newBuf.sampleRate);
                 "DEBUG buf_load sent /sediment/buf_info, calling sendWaveform".postln;
                 this.sendWaveform();
@@ -232,7 +241,7 @@ Engine_Sediment : CroneEngine {
                 waveData = waveData.add(maxVal.linlin(-1, 1, 0, 126).asInteger.clip(0, 126));
             });
 
-            Crone.remoteAddr.sendMsg("/sediment/waveform", *waveData);
+            matronAddr.sendMsg("/sediment/waveform", *waveData);
         });
     }
 
