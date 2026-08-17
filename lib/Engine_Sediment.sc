@@ -205,12 +205,13 @@ Engine_Sediment : CroneEngine {
     sendWaveform {
         "DEBUG sendWaveform: calling loadToFloatArray".postln;
         buffer.loadToFloatArray(action: { arg data;
-            "DEBUG sendWaveform: loadToFloatArray callback fired, data.size=".postln;
-            data.size.postln;
             var numChans = buffer.numChannels;
             var monoFrames = data.size div: numChans;
             var segSize = (monoFrames / 128).asInteger.max(1);
             var waveData = Array.new(256);
+
+            "DEBUG sendWaveform: loadToFloatArray callback fired, data.size=".postln;
+            data.size.postln;
 
             128.do({ arg i;
                 var startIdx = i * segSize * numChans;
