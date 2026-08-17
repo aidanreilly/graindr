@@ -46,11 +46,17 @@ fi
 echo "==> Finding SuperCollider source headers..."
 
 SC_PATH=""
-if [ -d "/usr/share/SuperCollider" ]; then
-    SC_INCLUDE="/usr/include/SuperCollider"
-    if [ -d "$SC_INCLUDE/plugin_interface" ]; then
-        SC_PATH="$SC_INCLUDE"
-    fi
+SC_INCLUDE="/usr/include/SuperCollider"
+if [ -f "$SC_INCLUDE/plugin_interface/SC_PlugIn.h" ]; then
+    # Sediment's CMake expects SC_PATH/include/plugin_interface/SC_PlugIn.h,
+    # i.e. SC_PATH pointing at the root of a full SC source checkout. Debian's
+    # supercollider-dev package installs the same headers flat, one level up
+    # from that (no extra "include" nesting), so shim it with a symlink
+    # rather than cloning the whole SC source tree just for headers.
+    SC_SHIM_DIR="$WORK_DIR/sc-include-shim"
+    mkdir -p "$SC_SHIM_DIR"
+    ln -sfn "$SC_INCLUDE" "$SC_SHIM_DIR/include"
+    SC_PATH="$SC_SHIM_DIR"
 fi
 
 SC_SRC_DIR="$WORK_DIR/supercollider"
