@@ -37,11 +37,14 @@ function init()
   waveform = Waveform.new(0, 10, 128, 38, 8)
 
   osc.event = function(path, args)
+    print("DEBUG lua osc.event: path=" .. path .. " nargs=" .. #args)
     if path == "/sediment/waveform" then
       waveform:set_samples(args)
+      print("DEBUG lua: set_samples called, #samples=" .. #waveform.samples)
     elseif path == "/sediment/buf_info" then
       local frames = args[1]
       local sr = args[2]
+      print("DEBUG lua: buf_info frames=" .. tostring(frames) .. " sr=" .. tostring(sr))
       if sr and sr > 0 then
         buf_duration = frames / sr
         sample_duration = buf_duration
