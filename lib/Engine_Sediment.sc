@@ -175,7 +175,7 @@ Engine_Sediment : CroneEngine {
             Buffer.read(context.server, path, action: { arg newBuf;
                 buffer.free;
                 buffer = newBuf;
-                context.server.addr.sendMsg("/sediment/buf_info",
+                Crone.remoteAddr.sendMsg("/sediment/buf_info",
                     newBuf.numFrames, newBuf.sampleRate);
                 this.sendWaveform();
             });
@@ -219,7 +219,7 @@ Engine_Sediment : CroneEngine {
                 waveData = waveData.add(maxVal.linlin(-1, 1, 0, 126).asInteger.clip(0, 126));
             });
 
-            context.server.addr.sendMsg("/sediment/waveform", *waveData);
+            Crone.remoteAddr.sendMsg("/sediment/waveform", *waveData);
         });
     }
 
