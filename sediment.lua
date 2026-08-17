@@ -235,6 +235,10 @@ end
 
 function load_sample(path)
   engine.buf_load(path)
+  for i = 0, NUM_VOICES - 1 do
+    voices[i] = nil
+    waveform:set_head_active(i + 1, false)
+  end
   sample_name = path:match("([^/]+)$") or path
 end
 
