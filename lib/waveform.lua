@@ -3,16 +3,17 @@
 local Waveform = {}
 Waveform.__index = Waveform
 
-function Waveform.new(x, y, w, h)
+function Waveform.new(x, y, w, h, num_heads)
   local wf = setmetatable({}, Waveform)
   wf.x = x
   wf.y = y
   wf.w = w
   wf.h = h
+  wf.num_heads = num_heads or 7
   wf.samples = {}
   wf.head_pos = {}
   wf.head_active = {}
-  for i = 1, 7 do
+  for i = 1, wf.num_heads do
     wf.head_pos[i] = -1
     wf.head_active[i] = false
   end
@@ -29,20 +30,20 @@ function Waveform:set_samples(data)
 end
 
 function Waveform:set_head_pos(head, pos)
-  if head >= 1 and head <= 7 then
+  if head >= 1 and head <= self.num_heads then
     self.head_pos[head] = pos
   end
 end
 
 function Waveform:set_head_active(head, active)
-  if head >= 1 and head <= 7 then
+  if head >= 1 and head <= self.num_heads then
     self.head_active[head] = active
   end
 end
 
 function Waveform:clear()
   self.samples = {}
-  for i = 1, 7 do
+  for i = 1, self.num_heads do
     self.head_pos[i] = -1
     self.head_active[i] = false
   end
@@ -70,7 +71,7 @@ function Waveform:draw()
     screen.stroke()
   end
 
-  for i = 1, 7 do
+  for i = 1, self.num_heads do
     local pos = self.head_pos[i]
     if self.head_active[i] and pos >= 0 and pos <= 1 then
       local px = self.x + math.floor(pos * (self.w - 1))
