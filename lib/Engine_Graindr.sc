@@ -16,11 +16,16 @@
 //     screen and grid along the same curve you hear
 //   - loop points per voice, with a direction, so a grid gesture can trap a
 //     playhead in a region and run it either way through it
+//   - up to four parallel grain streams per voice over the one playhead,
+//     selected by \grains, each with its own clock, jitter and pan
 //   - Glut's \freeze argument and level_N polls removed as unused here
 
 Engine_Graindr : CroneEngine {
 	classvar nvoices = 8;
 	classvar bufSeconds = 60;
+	// parallel grain streams per voice. every one is in the graph whether it
+	// is used or not, so this is the ceiling the \grains argument selects from
+	classvar maxStreams = 4;
 
 	var pg;
 	var effect;
@@ -68,15 +73,13 @@ Engine_Graindr : CroneEngine {
 			arg out, phase_out, env_out, buf_l, buf_r,
 			gate=0, hold=0, t_trig=0, sustain_time=2, pos=0, t_reset_pos=0,
 			speed=1, pitch=1, pan=0, gain=1,
-			size=0.1, density=20, jitter=0, spread=0,
+			size=0.1, density=20, jitter=0, spread=0, grains=1,
 			attack=0.5, decay=0.3, sustain=1.0, release=1.0,
 			lfo_shape=0, lfo_rate=0.2, lfo_depth=0,
 			loop_lo=0, loop_hi=1, loop_dir=1;
 
-			var grain_trig;
-			var jitter_sig;
+			var streams;
 			var buf_dur;
-			var pan_sig;
 			var lfo_sig;
 			var eff_speed;
 			var running;
@@ -85,21 +88,10 @@ Engine_Graindr : CroneEngine {
 			var held_env;
 			var shot_env;
 			var hold_env;
-			var sig_l;
-			var sig_r;
 			var sig_mix;
 			var env;
 
-			grain_trig = Impulse.kr(density);
 			buf_dur = BufDur.kr(buf_l);
-
-			pan_sig = TRand.kr(trig: grain_trig,
-				lo: spread.neg,
-				hi: spread);
-
-			jitter_sig = TRand.kr(trig: grain_trig,
-				lo: buf_dur.reciprocal.neg * jitter,
-				hi: buf_dur.reciprocal * jitter);
 
 			// bipolar, -1 to 1 in every shape, so lfo_depth means the same
 			// thing whichever shape is selected
@@ -168,10 +160,40 @@ Engine_Graindr : CroneEngine {
 			// position outside the loop needs a real modulo to pull it in
 			pos_sig = Wrap.kr(buf_pos, loop_lo, loop_hi);
 
-			sig_l = GrainBuf.ar(1, grain_trig, size, buf_l, pitch, pos_sig + jitter_sig, 2);
-			sig_r = GrainBuf.ar(1, grain_trig, size, buf_r, pitch, pos_sig + jitter_sig, 2);
+			// One playhead, several grain clouds over it. Every stream is
+			// built into the graph, because the graph is static, but a stream
+			// past the current count has its trigger multiplied to zero, and a
+			// GrainBuf with no triggers has no grains to iterate — so an unused
+			// stream costs its empty per-block overhead and nothing more.
+			//
+			// The same gate carries `running`, so a voice at rest computes no
+			// grains at all. Without it every voice would grind through its
+			// full grain load whether or not the envelope was letting any of it
+			// out, and eight idle voices would cost the same as eight playing
+			// ones. Grains already in flight still finish, which is why
+			// silencing a voice this way cannot click.
+			//
+			// Each stream runs its clock a few percent off its neighbours and
+			// starts it at a different phase, so they never lock into a common
+			// onset grid the way one faster clock would. Jitter and pan are
+			// drawn per stream rather than shared, which is what makes the
+			// cloud diffuse rather than merely denser.
+			streams = Array.fill(maxStreams, { arg k;
+				var active = (grains > k) * running;
+				var trig = Impulse.kr(density * (1 + (k * 0.037)),
+					k / maxStreams) * active;
+				var jitter_sig = TRand.kr(trig,
+					buf_dur.reciprocal.neg * jitter,
+					buf_dur.reciprocal * jitter);
+				var pan_sig = TRand.kr(trig, spread.neg, spread);
+				var l = GrainBuf.ar(1, trig, size, buf_l, pitch, pos_sig + jitter_sig, 2);
+				var r = GrainBuf.ar(1, trig, size, buf_r, pitch, pos_sig + jitter_sig, 2);
+				Balance2.ar(l, r, pan + pan_sig);
+			});
 
-			sig_mix = Balance2.ar(sig_l, sig_r, pan + pan_sig);
+			// square root, not 1/n: the streams are uncorrelated, so their sum
+			// grows with the square root of their number rather than linearly
+			sig_mix = Mix(streams) * grains.sqrt.reciprocal;
 
 			Out.ar(out, sig_mix * env * gain);
 			Out.kr(phase_out, pos_sig);
@@ -296,6 +318,10 @@ Engine_Graindr : CroneEngine {
 
 		this.addCommand("density", "f", { arg msg;
 			voices.do({ arg v; v.set(\density, msg[1]) });
+		});
+
+		this.addCommand("grains", "i", { arg msg;
+			voices.do({ arg v; v.set(\grains, msg[1]) });
 		});
 
 		this.addCommand("jitter", "f", { arg msg;

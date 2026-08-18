@@ -21,6 +21,8 @@ local NUM_VOICES = 8
 local LFO_SHAPES = {"sine", "triangle", "saw", "square", "random"}
 local REFRESH = 1 / 15
 local RAND_MAX = 16
+-- must match maxStreams in Engine_Graindr.sc
+local MAX_STREAMS = 4
 -- sustain time reads "inf" at the top of its range, sent to the engine as a
 -- sustain node long enough that nothing will outlast it
 local SUSTAIN_INF_AT = 30
@@ -28,6 +30,10 @@ local SUSTAIN_INF = 1e9
 -- the envelope poll runs at REFRESH, so a voice needs a short grace period
 -- after a trigger before the polled envelope can be trusted to say it is alive
 local TRIG_GUARD = 0.25
+-- the encoder readout sits at full brightness while you are still turning,
+-- then fades out over about the same time again
+local HUD_HOLD = 0.4
+local HUD_FADE = 0.4
 
 local waveform
 local g
@@ -38,15 +44,22 @@ local phase_polls = {}
 local env_polls = {}
 
 -- x of the first pad held down on each row, or nil. the loop gesture reads
--- this: a second press while a row has an anchor sets a loop instead of
--- triggering a note. grid_anchor_used records whether that happened, which is
--- what separates a loop-setting hold from a momentary tap on release.
+-- this: a second press while a row has an anchor sets a brace between them
+-- instead of triggering a note.
 local grid_anchor = {}
-local grid_anchor_used = {}
 
 local recording = false
 local rec_time = 0
 local rec_metro
+
+local hud_text = nil
+local hud_time = 0
+
+-- scsynth's average load, polled from crone. grains, density and size all
+-- multiply into the same budget on one core, so this is the number to watch
+-- while pushing them.
+local cpu_load = 0
+local cpu_poll
 
 local sample_name = ""
 local sample_duration = 0
@@ -124,17 +137,13 @@ end
 
 -- every voice starts from rest. a trigger rolls its random offsets, parks the
 -- playhead at the last position seeked on the grid, and fires one envelope
--- cycle that runs itself out — unless the voice is looping, in which case it
--- sustains instead and only clearing the loop stops it.
+-- cycle that runs itself out. a braced row is unbraced before it gets here,
+-- so a trigger is always the one-shot.
 local function trigger(i)
   local v = voices[i]
   randomize_voice(i)
   engine.seek(i, v.pos)
-  if v.loop_a then
-    engine.hold(i, 1)
-  else
-    engine.trig(i)
-  end
+  engine.trig(i)
   v.trig_time = util.time()
 end
 
@@ -230,41 +239,28 @@ function midi_event(data)
   end
 end
 
--- one pad is a note. two pads on a row are a loop: hold the start, tap the
--- end, and the playhead runs between them in the direction you pressed.
+-- one pad is a note. two pads on a row are a loop: hold the first, tap the
+-- second, and the playhead runs between them in the direction you pressed.
 --
--- tapping the start of an existing brace again releases the loop, but that
--- can only be told apart from the beginning of a new hold-and-tap gesture
--- once the pad comes back up: a press that set a new end point on the way is
--- an override and leaves the loop alone, and a press that did not is the
--- momentary tap that disengages it.
+-- a single press on a braced row frees the brace and plays the one-shot, so
+-- the way out of a loop is the same gesture as the way into a note. holding
+-- that pad and tapping a second still sets a new brace, which simply replaces
+-- the one the press just dropped.
 function grid_key(x, y, z)
   if y < 1 or y > NUM_VOICES then return end
-  local v = voices[y]
 
   if z == 1 then
     local anchor = grid_anchor[y]
     if anchor == nil then
       grid_anchor[y] = x
-      grid_anchor_used[y] = false
-      -- no retrigger on the brace start: it is either about to disengage the
-      -- loop or about to move its end, and the voice is already sustaining
-      if v.loop_a ~= x then
-        v.pos = grid_pos(x)
-        trigger(y)
-      end
+      if voices[y].loop_a then clear_loop(y) end
+      voices[y].pos = grid_pos(x)
+      trigger(y)
     elseif x ~= anchor then
       set_loop(y, anchor, x)
-      grid_anchor_used[y] = true
     end
   else
-    if grid_anchor[y] == x then
-      if not grid_anchor_used[y] and v.loop_a == x then
-        clear_loop(y)
-      end
-      grid_anchor[y] = nil
-      grid_anchor_used[y] = false
-    end
+    if grid_anchor[y] == x then grid_anchor[y] = nil end
   end
 end
 
@@ -309,12 +305,43 @@ function grid_refresh()
   g:refresh()
 end
 
+-- what the encoder just changed, over the middle of the waveform. it is laid
+-- on a black plate so the waveform behind it cannot make it unreadable, and
+-- it is gone a second after you stop turning.
+local function draw_hud()
+  if hud_text == nil then return end
+
+  local age = util.time() - hud_time
+  local level = 15
+  if age > HUD_HOLD then
+    level = math.floor(15 * (1 - (age - HUD_HOLD) / HUD_FADE))
+  end
+  if level < 1 then
+    hud_text = nil
+    return
+  end
+
+  local w = screen.text_extents(hud_text)
+  screen.level(0)
+  screen.rect(64 - (w / 2) - 3, 22, w + 6, 14)
+  screen.fill()
+  screen.level(level)
+  screen.move(64, 32)
+  screen.text_center(hud_text)
+end
+
 function redraw()
   screen.clear()
 
   screen.level(15)
   screen.move(0, 7)
   screen.text("GRAINDR")
+
+  -- dim until it is worth looking at, so it does not compete with the
+  -- waveform until you are actually near the edge
+  screen.level(cpu_load >= 80 and 15 or 3)
+  screen.move(64, 7)
+  screen.text_center(string.format("%d%%", math.floor(cpu_load + 0.5)))
 
   for i = 1, NUM_VOICES do
     waveform:set_head_level(i, voices[i].env)
@@ -328,6 +355,7 @@ function redraw()
   end
 
   waveform:draw()
+  draw_hud()
 
   screen.level(4)
   screen.move(0, 63)
@@ -350,12 +378,20 @@ function redraw()
 end
 
 function enc(n, d)
+  local id
   if n == 1 then
-    params:delta("density", d)
+    id = "density"
   elseif n == 2 then
-    params:delta("size", d)
+    id = "size"
   elseif n == 3 then
-    params:delta("jitter", d)
+    id = "jitter"
+  end
+  if id then
+    params:delta(id, d)
+    -- params:string is what the params menu itself renders with, so the
+    -- readout carries the same units and rounding you would see in there
+    hud_text = id .. "  " .. params:string(id)
+    hud_time = util.time()
   end
 end
 
@@ -403,7 +439,7 @@ end
 -- separators rather than nested groups. everything the script owns lives
 -- under the one menu item.
 function build_params()
-  params:add_group("graindr", 31)
+  params:add_group("graindr", 32)
 
   params:add_separator("sep_sample", "sample")
 
@@ -415,6 +451,12 @@ function build_params()
   end)
 
   params:add_separator("sep_grains", "grains")
+
+  -- parallel grain clouds over the one playhead, not a faster clock. each
+  -- stream draws its own jitter and pan, so this thickens and diffuses where
+  -- density only makes the same cloud denser.
+  params:add_number("grains", "grains", 1, MAX_STREAMS, 1)
+  params:set_action("grains", function(x) engine.grains(x) end)
 
   params:add_control("density", "density", controlspec.new(1, 512, "exp", 0, 20, "hz"))
   params:set_action("density", function(x) engine.density(x) end)
@@ -599,6 +641,12 @@ function init()
     env_polls[i] = e
   end
 
+  -- slower than the ui: an average does not need redrawing every frame, and
+  -- the point of the meter is to not cost anything itself
+  cpu_poll = poll.set("cpu_avg", function(val) cpu_load = val end)
+  cpu_poll.time = 0.25
+  cpu_poll:start()
+
   rec_metro = metro.init()
   rec_metro.time = 0.1
   rec_metro.event = function()
@@ -625,6 +673,7 @@ end
 
 function cleanup()
   if recording then stop_recording() end
+  if cpu_poll then cpu_poll:stop() end
   for i = 1, NUM_VOICES do
     if phase_polls[i] then phase_polls[i]:stop() end
     if env_polls[i] then env_polls[i]:stop() end
