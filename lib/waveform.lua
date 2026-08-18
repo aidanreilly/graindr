@@ -12,10 +12,10 @@ function Waveform.new(x, y, w, h, num_heads)
   wf.num_heads = num_heads or 7
   wf.samples = {}
   wf.head_pos = {}
-  wf.head_active = {}
+  wf.head_level = {}
   for i = 1, wf.num_heads do
     wf.head_pos[i] = -1
-    wf.head_active[i] = false
+    wf.head_level[i] = 0
   end
   return wf
 end
@@ -35,9 +35,11 @@ function Waveform:set_head_pos(head, pos)
   end
 end
 
-function Waveform:set_head_active(head, active)
+-- level is the voice's envelope value, 0 to 1. it drives brightness directly,
+-- so a head fades out along the release curve and disappears with it.
+function Waveform:set_head_level(head, level)
   if head >= 1 and head <= self.num_heads then
-    self.head_active[head] = active
+    self.head_level[head] = level or 0
   end
 end
 
@@ -45,7 +47,7 @@ function Waveform:clear()
   self.samples = {}
   for i = 1, self.num_heads do
     self.head_pos[i] = -1
-    self.head_active[i] = false
+    self.head_level[i] = 0
   end
 end
 
@@ -71,18 +73,18 @@ function Waveform:draw()
     screen.stroke()
   end
 
-  -- every head is drawn at all times, because every playhead is always
-  -- moving. head_active controls brightness only.
+  -- a head is drawn only while its voice is sounding, and its brightness is
+  -- the envelope, so heads appear on the attack and fade away on the release
   for i = 1, self.num_heads do
     local pos = self.head_pos[i]
-    if pos >= 0 and pos <= 1 then
-      local active = self.head_active[i]
+    local level = math.floor(self.head_level[i] * 15)
+    if level > 0 and pos >= 0 and pos <= 1 then
       local px = self.x + math.floor(pos * (self.w - 1))
-      screen.level(active and 15 or 4)
+      screen.level(level)
       screen.move(px, self.y)
       screen.line(px, self.y + self.h)
       screen.stroke()
-      screen.level(active and 10 or 3)
+      screen.level(math.max(math.floor(level * 0.7), 1))
       screen.move(px - 1, self.y + self.h + 6)
       screen.text(tostring(i))
     end

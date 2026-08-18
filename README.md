@@ -2,14 +2,9 @@
 
 A polyphonic granular synth for [norns](https://monome.org/norns).
 
-Eight granular voices read one shared sample. Every playhead moves continuously
-from the moment the script loads, each one driven by its own LFO that modulates
-the direction and rate of its travel. Play it from the grid with no MIDI
-attached, or send MIDI to transpose voices into chords.
+Eight granular voices read one shared sample. Every voice starts at rest: silent, with its playhead parked. A note wakes one up, its playhead scans the sample for as long as the envelope holds it open, and both fade away together. Play it from the grid with no MIDI attached, or send MIDI to transpose voices into chords.
 
-The engine is based on [Engine_Glut](https://github.com/artfwo/glut) by artfwo,
-adapted for a shared buffer, per-voice LFO modulation of playhead speed, and a
-global ADSR.
+The engine is based on [Engine_Glut](https://github.com/artfwo/glut) by artfwo, adapted for a shared buffer, per-voice LFO modulation of playhead speed, loop points, and a global ADSR.
 
 ## Requirements
 
@@ -27,77 +22,70 @@ No external UGens and no compilation step.
 
 ## Playing it
 
-Load a sample from PARAMS > GLOBAL > sample, or hold K3 to record from input.
-Then press a grid pad.
+Load a sample from PARAMS > GRAINDR > sample, or hold K3 to record from input. Then press a grid pad.
 
 ### Grid
 
-Row `n` is voice `n`, and all 16 columns are playhead positions. A press jumps
-that voice's playhead to that point in the sample and fires one cycle of the
-envelope. Brightness shows which voices are currently sounding.
+Row `n` is voice `n`, and all 16 columns are playhead positions.
 
-How long a press lasts is the envelope's job, set by **sustain mode**:
+A press jumps that voice's playhead to that point in the sample and fires one complete cycle of the envelope. How long the sound lasts is the ADSR's job, not your finger's: attack, decay, sustain time and release decide whether a press is a percussive stab or a pad that blooms and fades. Press again at any point, including during the sustain, to restart it from the attack.
 
-- **timed** plays one complete A-D-S-R cycle and stops by itself after the
-  sustain time. Short sustain gives percussive stabs, long sustain gives pads
-  that fade on their own. Pressing again during the sustain restarts the
-  attack.
-- **infinite** holds at the sustain level and drones until you hit K2.
+The playhead only exists while the voice is sounding. It appears on the attack, travels while the envelope is open, and fades out along the release curve before freezing where it stopped. A row with nothing playing is dark.
 
-So the ADSR decides whether the instrument is a trigger machine or a drone box,
-and the grid is one gesture either way.
+**Looping.** Hold one pad and tap another on the same row. The playhead is trapped between the two, and runs in the direction you pressed: left-to-right loops forward, right-to-left loops backward. Hold the same start pad and tap the same end pad again to let it go. Hold it and tap somewhere else to move the loop end instead. A loop stays lit dimly while the voice is silent, so you can see what a row is armed to do before you play it.
 
 ### MIDI
 
-A note takes a voice and transposes it relative to the root note param. MIDI
-keeps normal synth behaviour regardless of sustain mode: the note holds at the
-sustain level for as long as you hold the key, and note-off starts the release. Transposition multiplies the voice's own pitch param rather
-than replacing it, so a voice you have detuned in the params menu keeps its
-character when you play it.
+A note takes a voice and transposes it relative to the root note param. Unlike a grid press, a MIDI note holds at the sustain level for as long as you hold the key, and note-off starts the release. Transposition multiplies the voice's own pitch param rather than replacing it, so the pitch you dialled in still colours the note.
 
-Allocation prefers silent voices, so MIDI will not interrupt a drone you
-started from the grid until it runs out of quiet ones.
+A MIDI note restarts its voice from the last position seeked on the grid, so playing a chord stacks voices at wherever you last pressed. A voice you have never touched on the grid starts from its own even spread across the sample.
+
+Allocation prefers silent voices, so MIDI will not cut off something still ringing until it runs out of quiet ones.
 
 ### Norns
 
 - **E1** grain density
 - **E2** grain size
 - **E3** position jitter
-- **K2** panic: release every voice and drop all held notes
+- **K2** panic: cut every voice and drop all held notes
 - **K3** toggle recording from input
+
+## Voices and rand amt
+
+There is one set of voice params, shared by all eight voices, plus **rand amt**. That is what makes the voices differ from each other.
+
+At 0, all eight are identical. Turn it up and each voice gets its own random offset on speed, pitch, pan, level and both LFO controls, scaled from that one knob: at 16 the spread is a full ±16 semitones of pitch, ±1.0 of speed, hard left to hard right, ±12 dB, and the LFO wandering across most of its range. New offsets are rolled every time a voice is triggered, so repeated hits on the same pad never sound quite alike.
+
+Turning a shared param while a voice is sounding pushes the base value to every voice immediately, which collapses the randomisation until the next trigger rolls it again.
 
 ## LFO
 
-Each voice has an LFO in PARAMS > voice *n*. It adds a bipolar offset to that
-voice's playhead speed:
+The LFO adds a bipolar offset to playhead speed:
 
 ```
 effective speed = speed + (lfo * depth)
 ```
 
-With depth at 0 the playhead scans at a constant rate. Raise depth past the
-voice's speed and the sum swings through zero, so the playhead slows, reverses,
-and surges. Shapes are sine, triangle, saw, square, and random sample-and-hold.
-Rates are free-running, from 0.01 to 10 Hz, so voices drift out of phase with
-each other.
+With depth at 0 the playhead scans at a constant rate. Raise depth past the speed and the sum swings through zero, so the playhead slows, reverses, and surges. Shapes are sine, triangle, saw, square, and random sample-and-hold. Rates are free-running, from 0.01 to 10 Hz, and rand amt detunes each voice's rate so they drift out of phase with each other.
 
-Square at a low rate gives hard direction flips. Random gives a playhead that
-lurches to a new speed on every step.
+Square at a low rate gives hard direction flips. Random gives a playhead that lurches to a new speed on every step. Inside a loop, the LFO pushes the playhead back and forth within the region rather than across the whole sample.
 
 ## Params
 
-**GLOBAL** density, grain size, jitter, spread, attack, decay, sustain level,
-sustain mode, sustain time, release, volume, reverb mix/room/damp, and the
-sample file.
+Everything lives under one **GRAINDR** menu item, in sections:
 
-**voice 1-8** speed, pitch, pan, level, and the three LFO controls.
+**sample** the sample file.
 
-**MIDI** channel and root note.
+**grains** density, grain size, jitter, spread.
 
-**INPUT** input monitoring.
+**voices** attack, decay, sustain level, sustain time, release, then the shared voice params — speed, pitch, pan, level, the three LFO controls — and rand amt.
+
+**output** volume and reverb mix, room and damp.
+
+**midi** channel and root note.
+
+**input** input monitoring.
 
 ## Credits
 
-The granular engine is derived from [glut](https://github.com/artfwo/glut) by
-artfwo, which is where the `GrainBuf` voice structure, the free-running
-`Phasor` playhead and the phase polling all come from.
+The granular engine is derived from [glut](https://github.com/artfwo/glut) by artfwo, which is where the `GrainBuf` voice structure, the `Phasor` playhead and the phase polling all come from.

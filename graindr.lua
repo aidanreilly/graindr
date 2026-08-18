@@ -3,11 +3,11 @@
 --
 -- ▼ controls ▼
 -- E1 - density
--- E2 - size 
+-- E2 - size
 -- E3 - jitter
--- K2 - panic 
+-- K2 - panic
 -- K3 - record
--- grid - seek and play
+-- grid - trigger, hold+tap to loop
 -- midi - play the keys
 --
 -- engine based on glut
@@ -20,6 +20,10 @@ local Waveform = include("graindr/lib/waveform")
 local NUM_VOICES = 8
 local LFO_SHAPES = {"sine", "triangle", "saw", "square", "random"}
 local REFRESH = 1 / 15
+local RAND_MAX = 16
+-- the envelope poll runs at REFRESH, so a voice needs a short grace period
+-- after a trigger before the polled envelope can be trusted to say it is alive
+local TRIG_GUARD = 0.25
 
 local waveform
 local g
@@ -27,10 +31,12 @@ local grid_cols = 16
 
 local voices = {}
 local phase_polls = {}
+local env_polls = {}
 
-local sustain_infinite = false
-local sustain_time = 2.0
-local release_time = 1.0
+-- x of the first pad held down on each row, or nil. the loop gesture reads
+-- this: a second press while a row has an anchor sets a loop instead of
+-- triggering a note.
+local grid_anchor = {}
 
 local recording = false
 local rec_time = 0
@@ -51,37 +57,23 @@ local function semitones_to_ratio(st)
   return 2 ^ (st / 12)
 end
 
--- display only. the engine owns the envelope, so this is an estimate of
--- whether a voice is still making sound: a held MIDI note, a latched grid
--- press, or a timed trigger that has not yet run out its sustain and release.
+local function grid_pos(x)
+  local span = math.max(grid_cols - 1, 1)
+  return util.clamp((x - 1) / span, 0, 1)
+end
+
+-- the engine owns the envelope and polls its value back, so this is the real
+-- amplitude of the voice rather than an estimate of it. the guard covers the
+-- gap between firing a trigger and the first poll that reflects it.
 local function sounding(i)
   local v = voices[i]
-  return v.midi_note ~= nil or v.latched or util.time() < v.trig_until
+  return v.midi_note ~= nil
+    or v.env > 0.001
+    or (util.time() - v.trig_time) < TRIG_GUARD
 end
 
--- a grid press fires one complete envelope cycle. with sustain set to
--- infinite it latches the gate open instead, and only K2 closes it again.
-local function trigger(i)
-  if sustain_infinite then
-    voices[i].latched = true
-    engine.latch(i, 1)
-  else
-    voices[i].trig_until = util.time() + sustain_time + release_time
-    engine.trig(i)
-  end
-end
-
-local function silence(i)
-  local v = voices[i]
-  v.latched = false
-  v.midi_note = nil
-  v.trig_until = 0
-  engine.latch(i, 0)
-  engine.gate(i, 0)
-end
-
--- MIDI transposition multiplies the voice's own pitch param rather than
--- replacing it, so a voice detuned in the params menu keeps its character
+-- MIDI transposition multiplies the voice's own pitch rather than replacing
+-- it, so a voice detuned by the pitch param keeps its character
 local function apply_pitch(i)
   local v = voices[i]
   if v.midi_note then
@@ -91,8 +83,79 @@ local function apply_pitch(i)
   end
 end
 
+-- rand amt spreads a bipolar offset across each voice param, scaled to that
+-- param's own useful range. at 0 every voice is identical.
+local function rand_offset(amt, range)
+  if amt <= 0 then return 0 end
+  return (math.random() * 2 - 1) * range * (amt / RAND_MAX)
+end
+
+-- the voice params are shared by all eight voices, so the variation between
+-- them comes from here: fresh offsets are rolled for the voice being
+-- triggered, which is why repeated hits on one pad never sound quite alike.
+local function randomize_voice(i)
+  local amt = params:get("rand_amt")
+
+  engine.speed(i, util.clamp(
+    params:get("speed") + rand_offset(amt, 1.0), -2, 2))
+  engine.pan(i, util.clamp(
+    params:get("pan") + rand_offset(amt, 1.0), -1, 1))
+  engine.level(i, db_to_amp(util.clamp(
+    params:get("level") + rand_offset(amt, 12), -60, 20)))
+  engine.lfo_rate(i, util.clamp(
+    params:get("lfo_rate") + rand_offset(amt, 5), 0.01, 10))
+  engine.lfo_depth(i, util.clamp(
+    params:get("lfo_depth") + rand_offset(amt, 2), 0, 4))
+
+  voices[i].base_ratio =
+    semitones_to_ratio(params:get("pitch") + rand_offset(amt, RAND_MAX))
+  apply_pitch(i)
+end
+
+-- every voice starts from rest. a trigger rolls its random offsets, parks the
+-- playhead at the last position seeked on the grid, and fires one envelope
+-- cycle that runs itself out.
+local function trigger(i)
+  local v = voices[i]
+  randomize_voice(i)
+  engine.seek(i, v.pos)
+  engine.trig(i)
+  v.trig_time = util.time()
+end
+
+local function gate_on(i)
+  local v = voices[i]
+  randomize_voice(i)
+  engine.seek(i, v.pos)
+  engine.gate(i, 1)
+  v.trig_time = util.time()
+end
+
+local function silence(i)
+  local v = voices[i]
+  v.midi_note = nil
+  v.trig_time = -math.huge
+  engine.panic(i)
+end
+
+local function set_loop(i, ax, bx)
+  local v = voices[i]
+  local pa, pb = grid_pos(ax), grid_pos(bx)
+  v.loop_a, v.loop_b = ax, bx
+  v.loop_lo, v.loop_hi = math.min(pa, pb), math.max(pa, pb)
+  v.loop_dir = (bx > ax) and 1 or -1
+  engine.loop(i, v.loop_lo, v.loop_hi, v.loop_dir)
+end
+
+local function clear_loop(i)
+  local v = voices[i]
+  v.loop_a, v.loop_b = nil, nil
+  v.loop_lo, v.loop_hi, v.loop_dir = 0, 1, 1
+  engine.loop_clear(i)
+end
+
 local function allocate_voice()
-  -- prefer a silent voice, so MIDI does not interrupt a drone you started
+  -- prefer a silent voice, so a new note does not cut off one still ringing
   for i = 1, NUM_VOICES do
     if voices[i].midi_note == nil and not sounding(i) then return i end
   end
@@ -124,8 +187,7 @@ function midi_event(data)
     local i = allocate_voice()
     voices[i].midi_note = msg.note
     voices[i].midi_time = util.time()
-    apply_pitch(i)
-    engine.gate(i, 1)
+    gate_on(i)
   elseif msg.type == "note_off" or (msg.type == "note_on" and msg.vel == 0) then
     local i = find_voice_by_note(msg.note)
     if i then
@@ -136,34 +198,69 @@ function midi_event(data)
   end
 end
 
+-- one pad is a note. two pads on a row are a loop: hold the start, tap the
+-- end, and the playhead runs between them in the direction you pressed. tap
+-- the same end again to let it go.
 function grid_key(x, y, z)
-  if z == 0 then return end
   if y < 1 or y > NUM_VOICES then return end
 
-  local span = math.max(grid_cols - 1, 1)
-  local pos = util.clamp((x - 1) / span, 0, 1)
-  engine.seek(y, pos)
-  trigger(y)
+  if z == 1 then
+    local anchor = grid_anchor[y]
+    if anchor == nil then
+      grid_anchor[y] = x
+      voices[y].pos = grid_pos(x)
+      trigger(y)
+    elseif x ~= anchor then
+      local v = voices[y]
+      if v.loop_a == anchor and v.loop_b == x then
+        clear_loop(y)
+      else
+        set_loop(y, anchor, x)
+      end
+    end
+  else
+    if grid_anchor[y] == x then grid_anchor[y] = nil end
+  end
 end
 
 function grid_refresh()
   g:all(0)
   local span = math.max(grid_cols - 1, 1)
+
   for i = 1, NUM_VOICES do
-    -- brightness is the only cue for which voices are live, now that there
-    -- is no mute column
-    local peak = sounding(i) and 15 or 4
-    local float_x = voices[i].phase * span + 1
-    local x_lo = math.floor(float_x)
-    local x_hi = x_lo + 1
-    local frac = float_x - x_lo
-    if x_lo >= 1 and x_lo <= grid_cols then
-      g:led(x_lo, i, math.floor((1 - frac) * peak))
+    local v = voices[i]
+
+    -- a loop stays visible while the voice is silent, so you can see what a
+    -- row is armed to do before you play it
+    if v.loop_a then
+      local lo = math.min(v.loop_a, v.loop_b)
+      local hi = math.max(v.loop_a, v.loop_b)
+      for x = lo, hi do g:led(x, i, 1) end
+      g:led(v.loop_a, i, 4)
+      g:led(v.loop_b, i, 4)
     end
-    if x_hi >= 1 and x_hi <= grid_cols then
-      g:led(x_hi, i, math.floor(frac * peak))
+
+    -- the playhead is drawn only while the envelope is open, and fades with
+    -- it, so the grid follows the same shape you hear. the dim half of an
+    -- interpolated head is skipped rather than written as 0, so it cannot
+    -- punch a hole in the loop markers underneath.
+    local peak = math.floor(v.env * 15)
+    if peak > 0 then
+      local float_x = v.phase * span + 1
+      local x_lo = math.floor(float_x)
+      local x_hi = x_lo + 1
+      local frac = float_x - x_lo
+      local l_lo = math.floor((1 - frac) * peak)
+      local l_hi = math.floor(frac * peak)
+      if l_lo > 0 and x_lo >= 1 and x_lo <= grid_cols then
+        g:led(x_lo, i, l_lo)
+      end
+      if l_hi > 0 and x_hi >= 1 and x_hi <= grid_cols then
+        g:led(x_hi, i, l_hi)
+      end
     end
   end
+
   g:refresh()
 end
 
@@ -174,15 +271,9 @@ function redraw()
   screen.move(0, 7)
   screen.text("GRAINDR")
 
-  local n = 0
   for i = 1, NUM_VOICES do
-    local s = sounding(i)
-    waveform:set_head_active(i, s)
-    if s then n = n + 1 end
+    waveform:set_head_level(i, voices[i].env)
   end
-  screen.level(8)
-  screen.move(64, 7)
-  screen.text_center(n .. (n == 1 and " voice" or " voices"))
 
   if recording then
     screen.level(15)
@@ -254,8 +345,22 @@ function stop_recording()
   sample_duration = rec_time
 end
 
+-- norns renders one level of grouping, so the sections inside GRAINDR are
+-- separators rather than nested groups. everything the script owns lives
+-- under the one menu item.
 function build_params()
-  params:add_group("GLOBAL", 15)
+  params:add_group("graindr", 31)
+
+  params:add_separator("sep_sample", "sample")
+
+  params:add_file("sample", "sample", "/home/we/dust/audio/")
+  params:set_action("sample", function(path)
+    if path ~= "" and path ~= "/home/we/dust/audio/" then
+      load_sample(path)
+    end
+  end)
+
+  params:add_separator("sep_grains", "grains")
 
   params:add_control("density", "density", controlspec.new(1, 512, "exp", 0, 20, "hz"))
   params:set_action("density", function(x) engine.density(x) end)
@@ -269,6 +374,10 @@ function build_params()
   params:add_control("spread", "spread", controlspec.new(0, 100, "lin", 0, 0, "%"))
   params:set_action("spread", function(x) engine.spread(x / 100) end)
 
+  -- one set of voice params shared by all eight voices. rand amt is what
+  -- makes them differ: it is applied per voice as each one is triggered.
+  params:add_separator("sep_voices", "voices")
+
   params:add_control("attack", "attack", controlspec.new(0.001, 10, "exp", 0, 0.5, "s"))
   params:set_action("attack", function(x) engine.attack(x) end)
 
@@ -278,23 +387,53 @@ function build_params()
   params:add_control("sustain", "sustain level", controlspec.new(0, 1, "lin", 0, 1.0))
   params:set_action("sustain", function(x) engine.sustain(x) end)
 
-  -- infinite sustain is what turns a grid press into a drone. the engine
-  -- needs no special case for it: lua latches the gate instead of firing
-  -- the timed trigger.
-  params:add_option("sustain_mode", "sustain mode", {"timed", "infinite"}, 1)
-  params:set_action("sustain_mode", function(x) sustain_infinite = (x == 2) end)
-
   params:add_control("sustain_time", "sustain time", controlspec.new(0.05, 30, "exp", 0, 2.0, "s"))
-  params:set_action("sustain_time", function(x)
-    sustain_time = x
-    engine.sustain_time(x)
-  end)
+  params:set_action("sustain_time", function(x) engine.sustain_time(x) end)
 
   params:add_control("release", "release", controlspec.new(0.001, 10, "exp", 0, 1.0, "s"))
-  params:set_action("release", function(x)
-    release_time = x
-    engine.release(x)
+  params:set_action("release", function(x) engine.release(x) end)
+
+  params:add_control("speed", "speed", controlspec.new(-2, 2, "lin", 0, 1.0, "x"))
+  params:set_action("speed", function(x)
+    for i = 1, NUM_VOICES do engine.speed(i, x) end
   end)
+
+  params:add_number("pitch", "pitch", -24, 24, 0)
+  params:set_action("pitch", function(x)
+    for i = 1, NUM_VOICES do
+      voices[i].base_ratio = semitones_to_ratio(x)
+      apply_pitch(i)
+    end
+  end)
+
+  params:add_control("pan", "pan", controlspec.new(-1, 1, "lin", 0, 0))
+  params:set_action("pan", function(x)
+    for i = 1, NUM_VOICES do engine.pan(i, x) end
+  end)
+
+  params:add_control("level", "level", controlspec.new(-60, 20, "db", 0, 0, "dB"))
+  params:set_action("level", function(x)
+    for i = 1, NUM_VOICES do engine.level(i, db_to_amp(x)) end
+  end)
+
+  params:add_option("lfo_shape", "lfo shape", LFO_SHAPES, 1)
+  params:set_action("lfo_shape", function(x)
+    for i = 1, NUM_VOICES do engine.lfo_shape(i, x - 1) end
+  end)
+
+  params:add_control("lfo_rate", "lfo rate", controlspec.new(0.01, 10, "exp", 0, 0.2, "hz"))
+  params:set_action("lfo_rate", function(x)
+    for i = 1, NUM_VOICES do engine.lfo_rate(i, x) end
+  end)
+
+  params:add_control("lfo_depth", "lfo depth", controlspec.new(0, 4, "lin", 0, 0))
+  params:set_action("lfo_depth", function(x)
+    for i = 1, NUM_VOICES do engine.lfo_depth(i, x) end
+  end)
+
+  params:add_number("rand_amt", "rand amt", 0, RAND_MAX, 0)
+
+  params:add_separator("sep_output", "output")
 
   params:add_control("volume", "volume", controlspec.new(-60, 20, "db", 0, 0, "dB"))
   params:set_action("volume", function(x) engine.volume(db_to_amp(x)) end)
@@ -308,42 +447,7 @@ function build_params()
   params:add_control("reverb_damp", "reverb damp", controlspec.new(0, 1, "lin", 0, 0.5))
   params:set_action("reverb_damp", function(x) engine.reverb_damp(x) end)
 
-  params:add_file("sample", "sample", "/home/we/dust/audio/")
-  params:set_action("sample", function(path)
-    if path ~= "" and path ~= "/home/we/dust/audio/" then
-      load_sample(path)
-    end
-  end)
-
-  for i = 1, NUM_VOICES do
-    params:add_group("voice " .. i, 7)
-
-    params:add_control("speed_" .. i, "speed", controlspec.new(-2, 2, "lin", 0, 1.0, "x"))
-    params:set_action("speed_" .. i, function(x) engine.speed(i, x) end)
-
-    params:add_number("pitch_" .. i, "pitch", -24, 24, 0)
-    params:set_action("pitch_" .. i, function(x)
-      voices[i].base_ratio = semitones_to_ratio(x)
-      apply_pitch(i)
-    end)
-
-    params:add_control("pan_" .. i, "pan", controlspec.new(-1, 1, "lin", 0, 0))
-    params:set_action("pan_" .. i, function(x) engine.pan(i, x) end)
-
-    params:add_control("level_" .. i, "level", controlspec.new(-60, 20, "db", 0, 0, "dB"))
-    params:set_action("level_" .. i, function(x) engine.level(i, db_to_amp(x)) end)
-
-    params:add_option("lfo_shape_" .. i, "lfo shape", LFO_SHAPES, 1)
-    params:set_action("lfo_shape_" .. i, function(x) engine.lfo_shape(i, x - 1) end)
-
-    params:add_control("lfo_rate_" .. i, "lfo rate", controlspec.new(0.01, 10, "exp", 0, 0.2, "hz"))
-    params:set_action("lfo_rate_" .. i, function(x) engine.lfo_rate(i, x) end)
-
-    params:add_control("lfo_depth_" .. i, "lfo depth", controlspec.new(0, 4, "lin", 0, 0))
-    params:set_action("lfo_depth_" .. i, function(x) engine.lfo_depth(i, x) end)
-  end
-
-  params:add_group("MIDI", 2)
+  params:add_separator("sep_midi", "midi")
 
   local ch_names = {"all"}
   for i = 1, 16 do ch_names[i + 1] = tostring(i) end
@@ -356,7 +460,8 @@ function build_params()
     for i = 1, NUM_VOICES do apply_pitch(i) end
   end)
 
-  params:add_group("INPUT", 1)
+  params:add_separator("sep_input", "input")
+
   params:add_option("monitor", "monitor", {"off", "on"}, 1)
   params:set_action("monitor", function(x)
     audio.level_monitor(x == 2 and 1 or 0)
@@ -364,14 +469,22 @@ function build_params()
 end
 
 function init()
+  math.randomseed(math.floor(util.time() * 1000))
+
   for i = 1, NUM_VOICES do
     voices[i] = {
-      latched = false,
-      trig_until = 0,
       midi_note = nil,
       midi_time = 0,
+      trig_time = -math.huge,
       base_ratio = 1.0,
-      phase = (i - 1) / NUM_VOICES
+      pos = (i - 1) / NUM_VOICES,
+      phase = (i - 1) / NUM_VOICES,
+      env = 0,
+      loop_a = nil,
+      loop_b = nil,
+      loop_lo = 0,
+      loop_hi = 1,
+      loop_dir = 1
     }
   end
 
@@ -395,8 +508,8 @@ function init()
     end
   end
 
-  -- playhead position comes from the engine, which owns the Phasor and the
-  -- LFO driving it. no dead reckoning on the lua side.
+  -- playhead position and envelope both come from the engine, which owns the
+  -- Phasor and the ADSR. no dead reckoning on the lua side.
   for i = 1, NUM_VOICES do
     local p = poll.set("phase_" .. i, function(val)
       voices[i].phase = val
@@ -405,6 +518,13 @@ function init()
     p.time = REFRESH
     p:start()
     phase_polls[i] = p
+
+    local e = poll.set("env_" .. i, function(val)
+      voices[i].env = val
+    end)
+    e.time = REFRESH
+    e:start()
+    env_polls[i] = e
   end
 
   rec_metro = metro.init()
@@ -435,7 +555,7 @@ function cleanup()
   if recording then stop_recording() end
   for i = 1, NUM_VOICES do
     if phase_polls[i] then phase_polls[i]:stop() end
+    if env_polls[i] then env_polls[i]:stop() end
     engine.gate(i, 0)
-    engine.latch(i, 0)
   end
 end
