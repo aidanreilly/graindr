@@ -60,7 +60,7 @@ Allocation prefers silent voices, so MIDI will not cut off something still ringi
 - **K2** panic: cut every voice and drop all held notes
 - **K3** toggle recording from input
 
-Turning an encoder puts its name and value over the middle of the waveform, at the same rounding and units the params menu would show. It fades out about a second after you stop.
+Turning an encoder puts its name and value in the band below the waveform, at the same rounding and units the params menu would show. It fades out about a second after you stop.
 
 ## Voices and rand amt
 
@@ -72,13 +72,19 @@ Turning a shared param while a voice is sounding pushes the base value to every 
 
 ## Grains
 
-**density** is how often a voice fires a grain, and **size** is how long each one lasts. Multiplied together they give how many grains overlap at any moment: 20 Hz at 100 ms is two, 512 Hz at 500 ms is 256, which is most of what a single `GrainBuf` will hold.
+**smooth** is the one dial if you just want it more fluid. It sweeps density, size and scatter together along a grainy-to-liquid axis: at 0% it is pointillist, a scatter of separate events; at 50% it is the default, six grains deep and continuous; past 75% it is a wash. It writes to the three params underneath rather than hiding them, so you can see where it put them and carry on by hand from there — until you move it again, which takes them back.
+
+**density** is how often a voice fires a grain, and **size** is how long each one lasts. Multiplied together they give how many grains overlap at any moment, and that number is what fluid rather than grainy actually means. Below about two you hear individual grains; four to eight is continuous; past twenty it is a wash. 20 Hz at 100 ms is two. The defaults are 40 Hz at 150 ms, which is six.
+
+**scatter** is how far each grain's onset and length wander from the clock. At zero the grains fire on an exact grid, and at low densities you hear that grid as a pulse rather than as texture — the machine-gun artifact. A little scatter and the same grains become a cloud. It varies grain length as well as timing, which stops identical overlapping grains comb-filtering against each other.
 
 **grains** is a different axis. It runs up to four parallel grain clouds over the same playhead, each with its own clock, its own jitter and its own pan, rather than making one cloud fire faster. Every stream runs a few percent off its neighbours, so they never settle into the shared onset grid that a single faster clock gives you — turning it up thickens and diffuses rather than just adding density. The mix is compensated by the square root of the count, since the streams are uncorrelated, so it should stay at roughly the same level as you go.
 
 All four streams exist in the synth graph whether you use them or not, but an unused one has its trigger held at zero, and a `GrainBuf` with no triggers has no grains to iterate — so an idle stream costs its empty per-block overhead and nothing more.
 
 The same gate carries the envelope, so a voice at rest computes no grains at all. That matters more than it sounds: eight voices are allocated from the moment the engine loads, and without it they would all grind through a full grain load whether or not anything was letting the sound out.
+
+Grains are read with cubic interpolation. Every grain of a MIDI note off the root note is a resampled read, so this is audible exactly where it matters — playing it as a synth rather than scrubbing it at unity.
 
 ## CPU
 
@@ -110,7 +116,7 @@ Everything lives under one **GRAINDR** menu item, in sections:
 
 **sample** the sample file.
 
-**grains** grains, density, grain size, jitter, spread.
+**grains** smooth, grains, density, grain size, scatter, jitter, spread.
 
 **voices** attack, decay, sustain, sustain time, release, then the shared voice params — speed, pitch, pan, level, the three LFO controls — and rand amt.
 

@@ -61,6 +61,10 @@ local hud_time = 0
 local cpu_load = 0
 local cpu_poll
 
+-- the smooth macro writes to other params, which must not happen while init
+-- is still banging them into place
+local params_ready = false
+
 local sample_name = ""
 local sample_duration = 0
 -- the engine loads at most MAX_SAMPLE_SECONDS of a file. a longer one is cut
@@ -435,11 +439,38 @@ function stop_recording()
   sample_duration = rec_time
 end
 
+-- The smooth macro sweeps density and size exponentially, so overlap — their
+-- product, and the thing you actually hear as fluidity — runs from under one
+-- grain at a time up to a wash of dozens. At the midpoint it lands on the
+-- defaults, which is why moving it from 50% is a departure rather than a
+-- correction.
+local SMOOTH_MAP = {
+  density = {15, 105},
+  size = {50, 450},
+  scatter = {0, 60}
+}
+
+local function apply_smooth(t)
+  -- suppressed until init has finished banging: this writes to three other
+  -- params, and at bang time they are already at their own defaults, which
+  -- are the ones the macro's midpoint was chosen to match.
+  --
+  -- a pset load is safe without a guard, because smooth is added before the
+  -- three params it writes. a pset is read in param order, so the macro fires
+  -- first and the stored density, size and scatter land on top of it.
+  if not params_ready then return end
+
+  local function sweep(lo, hi) return lo * ((hi / lo) ^ t) end
+  params:set("density", sweep(SMOOTH_MAP.density[1], SMOOTH_MAP.density[2]))
+  params:set("size", sweep(SMOOTH_MAP.size[1], SMOOTH_MAP.size[2]))
+  params:set("scatter", util.linlin(0, 1, SMOOTH_MAP.scatter[1], SMOOTH_MAP.scatter[2], t))
+end
+
 -- norns renders one level of grouping, so the sections inside GRAINDR are
 -- separators rather than nested groups. everything the script owns lives
 -- under the one menu item.
 function build_params()
-  params:add_group("graindr", 32)
+  params:add_group("graindr", 34)
 
   params:add_separator("sep_sample", "sample")
 
@@ -452,17 +483,30 @@ function build_params()
 
   params:add_separator("sep_grains", "grains")
 
+  -- one dial along the grainy-to-fluid axis, moving density, size and scatter
+  -- together. it writes to those params rather than shadowing them, so you
+  -- can see where it put them and carry on by hand from there.
+  params:add_control("smooth", "smooth", controlspec.new(0, 100, "lin", 0, 50, "%"))
+  params:set_action("smooth", function(x) apply_smooth(x / 100) end)
+
   -- parallel grain clouds over the one playhead, not a faster clock. each
   -- stream draws its own jitter and pan, so this thickens and diffuses where
   -- density only makes the same cloud denser.
   params:add_number("grains", "grains", 1, MAX_STREAMS, 1)
   params:set_action("grains", function(x) engine.grains(x) end)
 
-  params:add_control("density", "density", controlspec.new(1, 512, "exp", 0, 20, "hz"))
+  -- density x size is how many grains overlap at once, which is what fluid
+  -- rather than grainy actually means. the defaults sit at six.
+  params:add_control("density", "density", controlspec.new(1, 512, "exp", 0, 40, "hz"))
   params:set_action("density", function(x) engine.density(x) end)
 
-  params:add_control("size", "size", controlspec.new(1, 500, "exp", 0, 100, "ms"))
+  params:add_control("size", "size", controlspec.new(1, 2000, "exp", 0, 150, "ms"))
   params:set_action("size", function(x) engine.size(x / 1000) end)
+
+  -- how far each grain's onset and length wander from the clock. at zero the
+  -- grain rate is audible as a pulse; a little of this and it is texture.
+  params:add_control("scatter", "scatter", controlspec.new(0, 100, "lin", 0, 30, "%"))
+  params:set_action("scatter", function(x) engine.scatter(x / 100) end)
 
   params:add_control("jitter", "jitter", controlspec.new(0, 500, "lin", 0, 0, "ms"))
   params:set_action("jitter", function(x) engine.jitter(x / 1000) end)
@@ -663,6 +707,7 @@ function init()
 
   build_params()
   params:bang()
+  params_ready = true
 
   local ui_metro = metro.init()
   ui_metro.time = REFRESH
