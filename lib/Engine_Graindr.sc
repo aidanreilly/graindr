@@ -66,7 +66,7 @@ Engine_Graindr : CroneEngine {
 
 		SynthDef(\graindr_voice, {
 			arg out, phase_out, env_out, buf_l, buf_r,
-			gate=0, t_trig=0, sustain_time=2, pos=0, t_reset_pos=0,
+			gate=0, hold=0, t_trig=0, sustain_time=2, pos=0, t_reset_pos=0,
 			speed=1, pitch=1, pan=0, gain=1,
 			size=0.1, density=20, jitter=0, spread=0,
 			attack=0.5, decay=0.3, sustain=1.0, release=1.0,
@@ -84,6 +84,7 @@ Engine_Graindr : CroneEngine {
 			var pos_sig;
 			var held_env;
 			var shot_env;
+			var hold_env;
 			var sig_l;
 			var sig_r;
 			var sig_mix;
@@ -110,8 +111,8 @@ Engine_Graindr : CroneEngine {
 				LFNoise0.kr(lfo_rate)
 			]);
 
-			// two envelopes over the same global ADSR values, combined with
-			// max so neither can close the other.
+			// three envelopes over the same values, combined with max so none
+			// of them can close another.
 			//
 			// held_env sustains for as long as a MIDI note holds it open.
 			// A negative gate forces an immediate release, which is how panic
@@ -130,7 +131,16 @@ Engine_Graindr : CroneEngine {
 					[attack, decay, sustain_time, release], -4),
 				gate: t_trig);
 
-			env = held_env.max(shot_env);
+			// hold_env is a looping voice. A loop takes the ADSR out of the
+			// picture: decay and sustain level do not apply and nothing runs
+			// out, so the voice sustains at full level for as long as the loop
+			// is set. Attack and release times are kept only as the ramps in
+			// and out, so engaging and clearing a loop does not click.
+			hold_env = EnvGen.kr(
+				Env.asr(attack, 1.0, release, -4),
+				gate: hold);
+
+			env = held_env.max(shot_env).max(hold_env);
 
 			// the playhead exists only while the voice is sounding. it starts
 			// moving on the attack and freezes where it stands the moment the
@@ -223,11 +233,16 @@ Engine_Graindr : CroneEngine {
 			voices[msg[1] - 1].set(\t_trig, 1);
 		});
 
+		// sustains a looping voice, bypassing the ADSR entirely
+		this.addCommand("hold", "ii", { arg msg;
+			voices[msg[1] - 1].set(\hold, msg[2]);
+		});
+
 		// a negative gate forces EnvGen to release over -1 - gate seconds.
 		// 20ms is short enough to read as a cut and long enough not to click,
-		// and it leaves both envelopes able to open again afterwards.
+		// and it leaves every envelope able to open again afterwards.
 		this.addCommand("panic", "i", { arg msg;
-			voices[msg[1] - 1].set(\gate, -1.02, \t_trig, -1.02);
+			voices[msg[1] - 1].set(\gate, -1.02, \t_trig, -1.02, \hold, -1.02);
 		});
 
 		this.addCommand("seek", "if", { arg msg;

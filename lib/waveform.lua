@@ -84,9 +84,6 @@ function Waveform:draw()
       screen.move(px, self.y)
       screen.line(px, self.y + self.h)
       screen.stroke()
-      screen.level(math.max(math.floor(level * 0.7), 1))
-      screen.move(px - 1, self.y + self.h + 6)
-      screen.text(tostring(i))
     end
   end
 end

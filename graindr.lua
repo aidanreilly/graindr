@@ -21,6 +21,10 @@ local NUM_VOICES = 8
 local LFO_SHAPES = {"sine", "triangle", "saw", "square", "random"}
 local REFRESH = 1 / 15
 local RAND_MAX = 16
+-- sustain time reads "inf" at the top of its range, sent to the engine as a
+-- sustain node long enough that nothing will outlast it
+local SUSTAIN_INF_AT = 30
+local SUSTAIN_INF = 1e9
 -- the envelope poll runs at REFRESH, so a voice needs a short grace period
 -- after a trigger before the polled envelope can be trusted to say it is alive
 local TRIG_GUARD = 0.25
@@ -35,8 +39,10 @@ local env_polls = {}
 
 -- x of the first pad held down on each row, or nil. the loop gesture reads
 -- this: a second press while a row has an anchor sets a loop instead of
--- triggering a note.
+-- triggering a note. grid_anchor_used records whether that happened, which is
+-- what separates a loop-setting hold from a momentary tap on release.
 local grid_anchor = {}
+local grid_anchor_used = {}
 
 local recording = false
 local rec_time = 0
@@ -114,12 +120,17 @@ end
 
 -- every voice starts from rest. a trigger rolls its random offsets, parks the
 -- playhead at the last position seeked on the grid, and fires one envelope
--- cycle that runs itself out.
+-- cycle that runs itself out — unless the voice is looping, in which case it
+-- sustains instead and only clearing the loop stops it.
 local function trigger(i)
   local v = voices[i]
   randomize_voice(i)
   engine.seek(i, v.pos)
-  engine.trig(i)
+  if v.loop_a then
+    engine.hold(i, 1)
+  else
+    engine.trig(i)
+  end
   v.trig_time = util.time()
 end
 
@@ -138,6 +149,9 @@ local function silence(i)
   engine.panic(i)
 end
 
+-- setting a loop takes the ADSR out of the picture: the voice sustains at
+-- full level for as long as the loop is set, rather than running out its
+-- envelope underneath it.
 local function set_loop(i, ax, bx)
   local v = voices[i]
   local pa, pb = grid_pos(ax), grid_pos(bx)
@@ -145,13 +159,18 @@ local function set_loop(i, ax, bx)
   v.loop_lo, v.loop_hi = math.min(pa, pb), math.max(pa, pb)
   v.loop_dir = (bx > ax) and 1 or -1
   engine.loop(i, v.loop_lo, v.loop_hi, v.loop_dir)
+  engine.hold(i, 1)
+  v.trig_time = util.time()
 end
 
+-- clearing the loop lets the sustain go, and the voice fades out over the
+-- release time
 local function clear_loop(i)
   local v = voices[i]
   v.loop_a, v.loop_b = nil, nil
   v.loop_lo, v.loop_hi, v.loop_dir = 0, 1, 1
   engine.loop_clear(i)
+  engine.hold(i, 0)
 end
 
 local function allocate_voice()
@@ -199,27 +218,40 @@ function midi_event(data)
 end
 
 -- one pad is a note. two pads on a row are a loop: hold the start, tap the
--- end, and the playhead runs between them in the direction you pressed. tap
--- the same end again to let it go.
+-- end, and the playhead runs between them in the direction you pressed.
+--
+-- tapping the start of an existing brace again releases the loop, but that
+-- can only be told apart from the beginning of a new hold-and-tap gesture
+-- once the pad comes back up: a press that set a new end point on the way is
+-- an override and leaves the loop alone, and a press that did not is the
+-- momentary tap that disengages it.
 function grid_key(x, y, z)
   if y < 1 or y > NUM_VOICES then return end
+  local v = voices[y]
 
   if z == 1 then
     local anchor = grid_anchor[y]
     if anchor == nil then
       grid_anchor[y] = x
-      voices[y].pos = grid_pos(x)
-      trigger(y)
-    elseif x ~= anchor then
-      local v = voices[y]
-      if v.loop_a == anchor and v.loop_b == x then
-        clear_loop(y)
-      else
-        set_loop(y, anchor, x)
+      grid_anchor_used[y] = false
+      -- no retrigger on the brace start: it is either about to disengage the
+      -- loop or about to move its end, and the voice is already sustaining
+      if v.loop_a ~= x then
+        v.pos = grid_pos(x)
+        trigger(y)
       end
+    elseif x ~= anchor then
+      set_loop(y, anchor, x)
+      grid_anchor_used[y] = true
     end
   else
-    if grid_anchor[y] == x then grid_anchor[y] = nil end
+    if grid_anchor[y] == x then
+      if not grid_anchor_used[y] and v.loop_a == x then
+        clear_loop(y)
+      end
+      grid_anchor[y] = nil
+      grid_anchor_used[y] = false
+    end
   end
 end
 
@@ -387,8 +419,19 @@ function build_params()
   params:add_control("sustain", "sustain level", controlspec.new(0, 1, "lin", 0, 1.0))
   params:set_action("sustain", function(x) engine.sustain(x) end)
 
+  -- the top of the range is infinite sustain: a press holds at the sustain
+  -- level until you press again or hit K2. the engine needs no special case
+  -- for it, since a sustain node long enough is indistinguishable from one
+  -- that never ends.
   params:add_control("sustain_time", "sustain time", controlspec.new(0.05, 30, "exp", 0, 2.0, "s"))
-  params:set_action("sustain_time", function(x) engine.sustain_time(x) end)
+  params:set_formatter("sustain_time", function(p)
+    local x = p:get()
+    if x >= SUSTAIN_INF_AT then return "inf" end
+    return string.format("%.2f s", x)
+  end)
+  params:set_action("sustain_time", function(x)
+    engine.sustain_time(x >= SUSTAIN_INF_AT and SUSTAIN_INF or x)
+  end)
 
   params:add_control("release", "release", controlspec.new(0.001, 10, "exp", 0, 1.0, "s"))
   params:set_action("release", function(x) engine.release(x) end)

@@ -28,11 +28,15 @@ Load a sample from PARAMS > GRAINDR > sample, or hold K3 to record from input. T
 
 Row `n` is voice `n`, and all 16 columns are playhead positions.
 
-A press jumps that voice's playhead to that point in the sample and fires one complete cycle of the envelope. How long the sound lasts is the ADSR's job, not your finger's: attack, decay, sustain time and release decide whether a press is a percussive stab or a pad that blooms and fades. Press again at any point, including during the sustain, to restart it from the attack.
+A press jumps that voice's playhead to that point in the sample and fires one complete cycle of the envelope. How long the sound lasts is the ADSR's job, not your finger's: attack, decay, sustain time and release decide whether a press is a percussive stab or a pad that blooms and fades. Press again at any point, including during the sustain, to restart it from the attack. Turn **sustain time** all the way up and it reads `inf`, which holds at the sustain level until you press again or hit K2 — the ADSR becomes a drone box rather than a trigger machine.
 
-The playhead only exists while the voice is sounding. It appears on the attack, travels while the envelope is open, and fades out along the release curve before freezing where it stopped. A row with nothing playing is dark.
+The playhead only exists while the voice is sounding. It appears on the attack, travels while the envelope is open, and fades out along the release curve before freezing where it stopped. A row with nothing playing is dark, and so is its line on the screen.
 
-**Looping.** Hold one pad and tap another on the same row. The playhead is trapped between the two, and runs in the direction you pressed: left-to-right loops forward, right-to-left loops backward. Hold the same start pad and tap the same end pad again to let it go. Hold it and tap somewhere else to move the loop end instead. A loop stays lit dimly while the voice is silent, so you can see what a row is armed to do before you play it.
+**Looping.** Hold one pad and tap another on the same row. The playhead is trapped between the two, and runs in the direction you pressed: left-to-right loops forward, right-to-left loops backward.
+
+Tap the start of the brace again to release the loop. Hold that same pad instead and tap somewhere else, and you move the loop end rather than releasing it — the tap only counts as a release if you let the pad up without having set a new end point. Holding any other pad and tapping a second overrides the brace outright.
+
+A loop takes the ADSR out of the picture. Decay, sustain level and sustain time stop applying and nothing runs out underneath it: the voice sustains at full level for as long as the loop is set, and only clearing the loop lets it go, fading out over the release time. Attack and release are kept as the ramps in and out so engaging and dropping a loop does not click. K2 still cuts it, and the loop stays armed afterwards — press the start pad again to bring it back. A loop stays lit dimly while the voice is silent, so you can see what a row is armed to do before you play it.
 
 ### MIDI
 
