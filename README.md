@@ -82,7 +82,7 @@ Everything lives under one **GRAINDR** menu item, in sections:
 
 **grains** density, grain size, jitter, spread.
 
-**voices** attack, decay, sustain level, sustain time, release, then the shared voice params — speed, pitch, pan, level, the three LFO controls — and rand amt.
+**voices** attack, decay, sustain, sustain time, release, then the shared voice params — speed, pitch, pan, level, the three LFO controls — and rand amt.
 
 **output** volume and reverb mix, room and damp.
 

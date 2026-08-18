@@ -416,19 +416,22 @@ function build_params()
   params:add_control("decay", "decay", controlspec.new(0.001, 10, "exp", 0, 0.3, "s"))
   params:set_action("decay", function(x) engine.decay(x) end)
 
-  params:add_control("sustain", "sustain level", controlspec.new(0, 1, "lin", 0, 1.0))
+  params:add_control("sustain", "sustain", controlspec.new(0, 1, "lin", 0, 1.0))
   params:set_action("sustain", function(x) engine.sustain(x) end)
 
   -- the top of the range is infinite sustain: a press holds at the sustain
   -- level until you press again or hit K2. the engine needs no special case
   -- for it, since a sustain node long enough is indistinguishable from one
   -- that never ends.
-  params:add_control("sustain_time", "sustain time", controlspec.new(0.05, 30, "exp", 0, 2.0, "s"))
-  params:set_formatter("sustain_time", function(p)
-    local x = p:get()
-    if x >= SUSTAIN_INF_AT then return "inf" end
-    return string.format("%.2f s", x)
-  end)
+  -- the formatter is the fourth argument to add_control, which Control passes
+  -- to its constructor and calls with the param itself
+  params:add_control("sustain_time", "sustain time",
+    controlspec.new(0.05, 30, "exp", 0, 2.0, "s"),
+    function(p)
+      local x = p:get()
+      if x >= SUSTAIN_INF_AT then return "inf" end
+      return string.format("%.2f s", x)
+    end)
   params:set_action("sustain_time", function(x)
     engine.sustain_time(x >= SUSTAIN_INF_AT and SUSTAIN_INF or x)
   end)
