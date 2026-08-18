@@ -13,9 +13,13 @@ replaces it, using `GrainBuf` and a free-running `Phasor` per voice.
 Eight voices read one shared sample buffer. Every playhead moves continuously
 from the moment the engine boots. Each voice carries its own LFO that modulates
 playhead speed bipolarly, so the playhead slows, reverses and accelerates under
-modulation. Voices are sounded by grid mutes, by momentary grid presses, and by
-MIDI. MIDI additionally transposes the voice it takes, which makes chromatic
-chords playable across the eight granular streams.
+modulation. A grid press seeks a voice's playhead and fires one cycle of the
+envelope. MIDI holds a voice for as long as the key is held and transposes it,
+which makes chromatic chords playable across the eight granular streams.
+
+The envelope carries a sustain time and a timed/infinite sustain mode, so the
+ADSR alone decides whether a grid press is a percussive stab, a pad that fades
+on its own, or a drone. There is no separate mute or latch mechanism.
 
 The screen UI and the general feel of the instrument are unchanged: a simple
 front page with a waveform and numbered playheads, with the detailed controls
@@ -29,8 +33,8 @@ living in the params menu.
 - Give every voice a params-accessible LFO controlling playhead direction and
   rate.
 - Keep all eight playheads moving from script start.
-- Make the instrument playable with no MIDI attached, using grid mutes.
-- Let MIDI trigger and transpose voices, overriding mutes.
+- Make the instrument playable with no MIDI attached, from the grid alone.
+- Let MIDI hold and transpose voices independently of grid triggers.
 - Keep the screen UI as it is.
 
 ## Non-goals
@@ -91,15 +95,23 @@ via two `RecordBuf` instances in one synth. `rec_start` first reallocates both
 buffers to the full 60 seconds, since a previously loaded short sample would
 otherwise cap the recording length.
 
+`rec_stop` takes the recorded duration in seconds as an argument, because Lua
+already tracks it via the recording metro and the server does not know where
+`RecordBuf` stopped. The engine allocates a trimmed buffer pair of that length,
+`copyData`s into it, and swaps. Skipping the trim would leave the playheads
+scanning the unrecorded remainder of a 60 second buffer, so a five second take
+would be mostly silence.
+
 ### Voice SynthDef
 
 `\graindr_voice` arguments:
 
 ```
 out, phase_out, buf_l, buf_r,
-gate=0, pos=0, t_reset_pos=0,
+gate=0, latch=0, t_trig=0, sustain_time=2, pos=0, t_reset_pos=0,
 speed=1, pitch=1, pan=0, gain=1,
-size=0.1, density=20, jitter=0, spread=0, envscale=1,
+size=0.1, density=20, jitter=0, spread=0,
+attack=0.5, decay=0.3, sustain=1.0, release=1.0,
 lfo_shape=0, lfo_rate=0.2, lfo_depth=0
 ```
 
@@ -145,7 +157,20 @@ sig_l = GrainBuf.ar(1, grain_trig, size, buf_l, pitch, pos_sig + jitter_sig, 2);
 sig_r = GrainBuf.ar(1, grain_trig, size, buf_r, pitch, pos_sig + jitter_sig, 2);
 sig_mix = Balance2.ar(sig_l, sig_r, pan + pan_sig);
 
-env = EnvGen.kr(Env.asr(1, 1, 1), gate: gate, timeScale: envscale);
+// held: MIDI note, or a grid press in infinite sustain mode
+held_env = EnvGen.kr(Env.adsr(attack, decay, sustain, release),
+    gate: gate.max(latch));
+
+// one-shot: a grid press in timed sustain mode. this Env has no
+// sustain node, so t_trig acts as a trigger. it runs one complete
+// cycle and ends on its own, and a second press during the sustain
+// restarts the attack rather than being swallowed by an open gate.
+shot_env = EnvGen.kr(
+    Env.new([0, 1, sustain, sustain, 0],
+        [attack, decay, sustain_time, release], -4),
+    gate: t_trig);
+
+env = held_env.max(shot_env);
 
 Out.ar(out, sig_mix * env * gain);
 Out.kr(phase_out, pos_sig);
@@ -180,7 +205,9 @@ convention, and subtract 1 internally.
 
 | Command | Format | Effect |
 | --- | --- | --- |
-| `gate` | `ii` | set `\gate` on voice |
+| `gate` | `ii` | set `\gate` on voice, the MIDI hold |
+| `latch` | `ii` | set `\latch` on voice, the infinite-sustain grid hold |
+| `trig` | `i` | pulse `\t_trig` on voice, firing one timed envelope cycle |
 | `seek` | `if` | set `\pos` and pulse `\t_reset_pos` on voice |
 | `speed` | `if` | set `\speed` on voice |
 | `pitch` | `if` | set `\pitch` on voice, as a frequency ratio |
@@ -198,17 +225,21 @@ Global commands apply to all eight voices, or to the effect or buffers.
 | `density` | `f` | grains per second |
 | `jitter` | `f` | position jitter, seconds |
 | `spread` | `f` | per-grain pan spread, 0 to 1 |
-| `envscale` | `f` | envelope attack and release scale |
+| `attack` | `f` | ADSR attack, seconds |
+| `decay` | `f` | ADSR decay, seconds |
+| `sustain` | `f` | ADSR sustain level, 0 to 1 |
+| `sustain_time` | `f` | length of the one-shot sustain stage, seconds |
+| `release` | `f` | ADSR release, seconds |
 | `volume` | `f` | master amplitude, sets `\amp` on the effect synth |
 | `reverb_mix` | `f` | FreeVerb mix |
 | `reverb_room` | `f` | FreeVerb room |
 | `reverb_damp` | `f` | FreeVerb damp |
 | `buf_load` | `s` | load a sample into the shared buffers |
 | `rec_start` | `` | begin recording from input |
-| `rec_stop` | `` | stop recording, resend waveform |
+| `rec_stop` | `f` | stop recording, trim buffers to the given duration, resend waveform |
 
-Global values are held in a `Dictionary` so that a voice re-set after
-`buf_load` keeps the current settings.
+Voice synths are allocated once and never recreated, so a `set` sticks and no
+engine-side cache of global values is needed.
 
 All commands take engine-native units. Lua owns the conversion from
 display units: milliseconds are divided by 1000 before `size` and `jitter`,
@@ -257,8 +288,8 @@ An array of eight tables, 1-indexed:
 
 ```lua
 {
-  muted     = true,  -- mirrors the voice's mute param
-  held_x    = nil,   -- grid column currently held in this row, or nil
+  latched    = false, -- grid press held open by infinite sustain mode
+  trig_until = 0,     -- util.time() a timed trigger is expected to finish
   midi_note = nil,   -- MIDI note currently assigned, or nil
   midi_time = 0,     -- util.time() when the note was assigned, for stealing
   base_ratio = 1.0,  -- from the voice's pitch param, in semitones
@@ -266,21 +297,36 @@ An array of eight tables, 1-indexed:
 }
 ```
 
-### Gate rule
+### Trigger model
 
-One predicate governs audibility:
+Three engine controls open a voice, and the SynthDef combines them with `max`
+so none can close another's gate.
+
+`gate` is a level driven by MIDI. `latch` is a level driven by a grid press
+while sustain mode is infinite. `t_trig` is a trigger fired by a grid press
+while sustain mode is timed.
+
+`gate` and `latch` are separate controls rather than one shared level because a
+MIDI note-off would otherwise close a gate that a grid press had latched open.
+
+Lua branches on sustain mode in `trigger(i)`:
 
 ```lua
-local function audible(i)
-  local v = voices[i]
-  return (not v.muted) or (v.held_x ~= nil) or (v.midi_note ~= nil)
+local function trigger(i)
+  if sustain_infinite then
+    voices[i].latched = true
+    engine.latch(i, 1)
+  else
+    voices[i].trig_until = util.time() + sustain_time + release_time
+    engine.trig(i)
+  end
 end
 ```
 
-`update_gate(i)` computes it, compares against a cached `gate_state[i]`, and
-sends `engine.gate(i, ...)` only on a change. Every input path calls
-`update_gate` after mutating state, so mute, grid and MIDI cannot disagree
-about whether a voice is on.
+`sounding(i)` returns whether a voice is making noise, and exists purely to
+drive the screen and grid brightness. For a timed trigger it is an estimate
+from `trig_until`, since the engine owns the envelope and Lua is not told when
+it finishes.
 
 ### Pitch
 
@@ -298,8 +344,8 @@ params menu therefore keeps its character when played from MIDI.
 
 `allocate_voice()` searches in order:
 
-1. A voice that is muted and has no MIDI note. This protects drones you have
-   deliberately unmuted.
+1. A voice with no MIDI note that is not sounding. This protects drones you
+   have started from the grid.
 2. Any voice with no MIDI note.
 3. The voice whose `midi_time` is oldest, stolen.
 
@@ -313,20 +359,16 @@ all channels.
 
 Row `y` maps to voice `y`, for `y` in 1 to 8. Rows beyond 8 are ignored.
 
-Column 1 is mute. On key-down it toggles the voice's mute param, which in turn
-sets `voices[y].muted` and calls `update_gate`.
-
-Columns 2 to 16 are seek positions, `pos = (x - 2) / 14`, giving 15 positions
-across the buffer. On key-down: `engine.seek(y, pos)`, set `held_x = x`, then
-`update_gate`. On key-up: clear `held_x` only if it still equals `x`, then
-`update_gate`. Guarding on the column value means that releasing an earlier
-finger in a row does not cut a later press.
+All 16 columns are seek positions, `pos = (x - 1) / 15`. On key-down:
+`engine.seek(y, pos)` then `trigger(y)`. Key-up is ignored entirely, because a
+press is a trigger rather than a hold.
 
 Grid LEDs, refreshed at 1/15:
 
-- Column 1: level 15 when the voice is unmuted, level 3 when muted.
-- Columns 2 to 16: the playhead, drawn with the existing two-cell brightness
-  interpolation remapped from 16 columns to 15. `float_x = phase * 14 + 2`.
+- The playhead, drawn with the existing two-cell brightness interpolation
+  across all 16 columns, `float_x = phase * 15 + 1`. Peak level is 15 when the
+  voice is sounding and 4 when it is not. Brightness is the only cue for which
+  voices are live, now that there is no mute column.
 
 ### Screen
 
@@ -356,15 +398,17 @@ unchanged, so nothing else in the module moves.
 - E1 density
 - E2 size
 - E3 jitter
-- K2 panic: mute every voice, clear every `held_x` and `midi_note`, gate all
-  voices off
+- K2 panic: clear `latched` and `midi_note` on every voice, zero both `gate`
+  and `latch`. A timed one-shot already in flight rings out on its own, bounded
+  by sustain time plus release, because a running `EnvGen` one-shot has no
+  cancel input. Infinite drones, the only unbounded case, stop immediately.
 - K3 toggle recording from input
 
 ### Params
 
 Roughly 50 params, in this order.
 
-`GLOBAL` group:
+`GLOBAL` group, 15 params:
 
 | Param | Range | Default |
 | --- | --- | --- |
@@ -372,18 +416,22 @@ Roughly 50 params, in this order.
 | size | 1 to 500, exp, ms | 100 |
 | jitter | 0 to 500, lin, ms | 0 |
 | spread | 0 to 100, lin, % | 0 |
-| envscale | 0 to 10, lin, s | 1 |
+| attack | 0.001 to 10, exp, s | 0.5 |
+| decay | 0.001 to 10, exp, s | 0.3 |
+| sustain | 0 to 1, lin | 1.0 |
+| sustain mode | timed / infinite | timed |
+| sustain time | 0.05 to 30, exp, s | 2.0 |
+| release | 0.001 to 10, exp, s | 1.0 |
 | volume | -60 to 20, db | 0 |
 | reverb mix | 0 to 1, lin | 0.3 |
 | reverb room | 0 to 1, lin | 0.5 |
 | reverb damp | 0 to 1, lin | 0.5 |
 | sample | file, `/home/we/dust/audio/` | none |
 
-Eight `voice N` groups, each:
+Eight `voice N` groups, 7 params each:
 
 | Param | Range | Default |
 | --- | --- | --- |
-| mute | off / on | on |
 | speed | -2 to 2, lin | 1.0 |
 | pitch | -24 to 24, semitones | 0 |
 | pan | -1 to 1, lin | 0 |
@@ -396,24 +444,21 @@ Eight `voice N` groups, each:
 
 `INPUT` group: monitor (off / on).
 
-Mute lives in params rather than in Lua state alone so that grid mutes are
-saved and restored with a PSET. The grid handler sets the param and the param
-action updates voice state, which keeps a single source of truth.
-
 Defaults of `speed` 1.0 and `lfo_depth` 0 mean that on a fresh load every
 playhead scans forward at natural rate with no modulation, which is the
 clearest starting point for someone dialling in an LFO.
 
 ## Behaviour summary
 
-At script start every voice is muted, so nothing sounds, while all eight
-playheads scan the buffer visibly on screen and on the grid. Unmuting a row
-with column 1 opens that voice into a drone. Holding a button in columns 2 to
-16 seeks that voice's playhead and sounds it for as long as the button is
-held, so muted rows become momentary stabs and unmuted rows become scrubbable.
+At script start nothing sounds, while all eight playheads scan the buffer
+visibly on screen and on the grid. A grid press seeks that row's playhead and
+fires the envelope. In timed sustain mode the voice plays a complete cycle and
+stops by itself, so short sustain times give percussive stabs and long ones
+give self-fading pads. In infinite sustain mode the same press drones until K2.
 Raising a voice's LFO depth makes its playhead wander, reverse and surge.
-Incoming MIDI takes a voice, overrides its mute, and transposes it, so several
-notes at once produce a chord across independently drifting granular streams.
+Incoming MIDI holds a voice for as long as the key is down and transposes it,
+so several notes at once produce a chord across independently drifting granular
+streams.
 
 ## Verification
 
@@ -426,8 +471,9 @@ Verification is therefore layered:
    known-good on norns.
 3. Manual checks on hardware, in this order: script loads with no engine
    error; eight playheads move on screen with no sample loaded; a sample loads
-   and the waveform draws; column 1 mutes toggle audibly; columns 2 to 16 seek
-   and sound; a MIDI chord plays chromatically; LFO depth visibly changes
+   and the waveform draws; a grid press sounds a timed one-shot that ends by
+   itself; infinite sustain mode drones until K2; retriggering during a sustain
+   restarts the attack; a MIDI chord plays chromatically; LFO depth visibly changes
    playhead motion; K2 silences everything; K3 records.
 
 Work is sequenced so that each step leaves the script loadable, rather than

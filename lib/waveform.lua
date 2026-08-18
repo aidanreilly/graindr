@@ -71,16 +71,19 @@ function Waveform:draw()
     screen.stroke()
   end
 
+  -- every head is drawn at all times, because every playhead is always
+  -- moving. head_active controls brightness only.
   for i = 1, self.num_heads do
     local pos = self.head_pos[i]
-    if self.head_active[i] and pos >= 0 and pos <= 1 then
+    if pos >= 0 and pos <= 1 then
+      local active = self.head_active[i]
       local px = self.x + math.floor(pos * (self.w - 1))
-      screen.level(15)
+      screen.level(active and 15 or 4)
       screen.move(px, self.y)
       screen.line(px, self.y + self.h)
       screen.stroke()
+      screen.level(active and 10 or 3)
       screen.move(px - 1, self.y + self.h + 6)
-      screen.level(10)
       screen.text(tostring(i))
     end
   end
