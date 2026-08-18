@@ -334,23 +334,46 @@ Engine_Graindr : CroneEngine {
 		this.addCommand("reverb_room", "f", { arg msg; effect.set(\room, msg[1]); });
 		this.addCommand("reverb_damp", "f", { arg msg; effect.set(\damp, msg[1]); });
 
+		// Reads at most bufSeconds, the same ceiling the recorder works to.
+		// Without it the whole file is allocated on the server, so an hour
+		// long recording asks for gigabytes and takes scsynth down with it.
+		// Anything longer loads its first bufSeconds instead of failing.
 		this.addCommand("buf_load", "s", { arg msg;
 			var path = msg[1].asString;
-			if(File.exists(path), {
-				var numChannels = SoundFile.use(path, { arg f; f.numChannels });
-				var srcR = if(numChannels > 1, { 1 }, { 0 });
-				// both reads complete before the old pair is freed, so a
-				// failed read cannot leave a voice pointing at freed memory
-				Buffer.readChannel(context.server, path, 0, -1, [0], { arg newL;
-					Buffer.readChannel(context.server, path, 0, -1, [srcR], { arg newR;
-						this.swapBuffers(newL, newR);
-						matronAddr.sendMsg("/graindr/buf_info",
-							newL.numFrames, newL.sampleRate);
-						this.sendWaveform();
+			var file;
+
+			if(File.exists(path).not, {
+				("Engine_Graindr: no such file: " ++ path).warn;
+			}, {
+				file = SoundFile.openRead(path);
+				if(file.isNil, {
+					("Engine_Graindr: could not read as audio: " ++ path).warn;
+				}, {
+					var numChannels = file.numChannels;
+					var fileFrames = file.numFrames;
+					var maxFrames = (bufSeconds * file.sampleRate).asInteger;
+					var frames = fileFrames.min(maxFrames).max(1);
+					var truncated = if(fileFrames > maxFrames, { 1 }, { 0 });
+					var srcR = if(numChannels > 1, { 1 }, { 0 });
+					file.close;
+
+					if(truncated == 1, {
+						("Engine_Graindr: " ++ path ++ " is longer than "
+							++ bufSeconds ++ "s, loading the first "
+							++ bufSeconds ++ "s").warn;
+					});
+
+					// both reads complete before the old pair is freed, so a
+					// failed read cannot leave a voice pointing at freed memory
+					Buffer.readChannel(context.server, path, 0, frames, [0], { arg newL;
+						Buffer.readChannel(context.server, path, 0, frames, [srcR], { arg newR;
+							this.swapBuffers(newL, newR);
+							matronAddr.sendMsg("/graindr/buf_info",
+								newL.numFrames, newL.sampleRate, truncated);
+							this.sendWaveform();
+						});
 					});
 				});
-			}, {
-				("Engine_Graindr: no such file: " ++ path).warn;
 			});
 		});
 
@@ -391,7 +414,7 @@ Engine_Graindr : CroneEngine {
 					context.server.sync;
 					this.swapBuffers(newL, newR);
 					matronAddr.sendMsg("/graindr/buf_info",
-						frames, context.server.sampleRate);
+						frames, context.server.sampleRate, 0);
 					this.sendWaveform();
 				}).play(AppClock);
 			});
@@ -411,28 +434,49 @@ Engine_Graindr : CroneEngine {
 	// screen. Polls carry a single float, so this goes over custom OSC.
 	sendWaveform {
 		bufL.loadToFloatArray(action: { arg data;
-			var segSize = (data.size / 128).asInteger.max(1);
+			var peak = 0.0;
+			var scale;
 			var waveData = Array.new(256);
 
-			128.do({ arg i;
-				var startIdx = i * segSize;
-				var minVal = 1.0;
-				var maxVal = -1.0;
+			if(data.size < 1, {
+				"Engine_Graindr: empty buffer, no waveform to send".warn;
+			}, {
+				// the display is normalised to the buffer's own peak, so a
+				// quiet or short sample fills the screen rather than drawing
+				// as a thin line through the middle. the floor stops a nearly
+				// silent buffer being amplified into a screenful of noise.
+				data.do({ arg samp;
+					var mag = samp.abs;
+					if(mag > peak, { peak = mag });
+				});
+				scale = if(peak > 0.01, { 1.0 / peak }, { 1.0 });
 
-				segSize.do({ arg j;
-					var idx = startIdx + j;
-					if(idx < data.size, {
-						var samp = data[idx];
+				("Engine_Graindr: waveform " ++ data.size ++ " frames, peak "
+					++ peak.round(0.001)).postln;
+
+				// segment bounds are computed from the true fractional width
+				// rather than a truncated integer, so the last columns are not
+				// dropped and a buffer shorter than 128 frames still fills the
+				// display instead of trailing off into unwritten segments
+				128.do({ arg i;
+					var startIdx = (i * data.size / 128).asInteger;
+					var endIdx = ((i + 1) * data.size / 128).asInteger
+						.max(startIdx + 1).min(data.size);
+					var minVal = 0.0;
+					var maxVal = 0.0;
+
+					(endIdx - startIdx).do({ arg j;
+						var samp = data[startIdx + j] * scale;
 						if(samp < minVal, { minVal = samp });
 						if(samp > maxVal, { maxVal = samp });
 					});
+
+					waveData = waveData.add(minVal.linlin(-1, 1, 0, 126).asInteger.clip(0, 126));
+					waveData = waveData.add(maxVal.linlin(-1, 1, 0, 126).asInteger.clip(0, 126));
 				});
 
-				waveData = waveData.add(minVal.linlin(-1, 1, 0, 126).asInteger.clip(0, 126));
-				waveData = waveData.add(maxVal.linlin(-1, 1, 0, 126).asInteger.clip(0, 126));
+				matronAddr.sendMsg("/graindr/waveform", *waveData);
 			});
-
-			matronAddr.sendMsg("/graindr/waveform", *waveData);
 		});
 	}
 

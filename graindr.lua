@@ -50,6 +50,10 @@ local rec_metro
 
 local sample_name = ""
 local sample_duration = 0
+-- the engine loads at most MAX_SAMPLE_SECONDS of a file. a longer one is cut
+-- rather than refused, and the duration is marked so it is not a silent lie.
+local MAX_SAMPLE_SECONDS = 60
+local sample_truncated = false
 
 local midi_device
 local midi_channel = 0
@@ -171,6 +175,15 @@ local function clear_loop(i)
   v.loop_lo, v.loop_hi, v.loop_dir = 0, 1, 1
   engine.loop_clear(i)
   engine.hold(i, 0)
+end
+
+-- a brace marks a region of the sample. when the buffer underneath it is
+-- replaced there is nothing left for it to point at, so every loop is
+-- dropped and the voices holding them are let go.
+local function clear_all_loops()
+  for i = 1, NUM_VOICES do
+    if voices[i].loop_a then clear_loop(i) end
+  end
 end
 
 local function allocate_voice()
@@ -327,7 +340,10 @@ function redraw()
     local mins = math.floor(sample_duration / 60)
     local secs = math.floor(sample_duration % 60)
     screen.move(128, 63)
-    screen.text_right(string.format("%d:%02d", mins, secs))
+    -- a leading * means the file was longer than the engine will hold and
+    -- only its first MAX_SAMPLE_SECONDS are loaded
+    screen.text_right(string.format("%s%d:%02d",
+      sample_truncated and "*" or "", mins, secs))
   end
 
   screen.update()
@@ -356,13 +372,16 @@ function key(n, z)
 end
 
 function load_sample(path)
+  clear_all_loops()
   engine.buf_load(path)
   sample_name = path:match("([^/]+)$") or path
 end
 
 function start_recording()
+  clear_all_loops()
   recording = true
   rec_time = 0
+  sample_truncated = false
   sample_name = "[recording]"
   engine.rec_start()
   rec_metro:start()
@@ -371,6 +390,9 @@ end
 function stop_recording()
   recording = false
   rec_metro:stop()
+  -- the trim rescales every position in the buffer, so a brace set while
+  -- recording would end up pointing somewhere else entirely
+  clear_all_loops()
   -- the engine trims its 60s capture buffer down to this duration
   engine.rec_stop(rec_time)
   sample_name = "[recorded]"
@@ -545,12 +567,16 @@ function init()
 
   osc.event = function(path, args)
     if path == "/graindr/waveform" then
+      -- TEMPORARY: tracing why a newly loaded sample can leave the previous
+      -- waveform on screen. remove once that is understood.
+      print("graindr: waveform received, " .. tostring(#args) .. " args")
       waveform:set_samples(args)
     elseif path == "/graindr/buf_info" then
-      local frames, sr = args[1], args[2]
+      local frames, sr, truncated = args[1], args[2], args[3]
       if sr and sr > 0 then
         sample_duration = frames / sr
       end
+      sample_truncated = (truncated == 1)
     end
   end
 
@@ -578,7 +604,7 @@ function init()
   rec_metro.event = function()
     if recording then
       rec_time = rec_time + 0.1
-      if rec_time >= 60 then stop_recording() end
+      if rec_time >= MAX_SAMPLE_SECONDS then stop_recording() end
     end
   end
 
