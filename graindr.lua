@@ -305,9 +305,9 @@ function grid_refresh()
   g:refresh()
 end
 
--- what the encoder just changed, over the middle of the waveform. it is laid
--- on a black plate so the waveform behind it cannot make it unreadable, and
--- it is gone a second after you stop turning.
+-- what the encoder just changed, in the band between the waveform and the
+-- sample name. it is laid on a black plate so nothing behind it can make it
+-- unreadable, and it is gone a second after you stop turning.
 local function draw_hud()
   if hud_text == nil then return end
 
@@ -323,10 +323,10 @@ local function draw_hud()
 
   local w = screen.text_extents(hud_text)
   screen.level(0)
-  screen.rect(64 - (w / 2) - 3, 22, w + 6, 14)
+  screen.rect(64 - (w / 2) - 3, 43, w + 6, 11)
   screen.fill()
   screen.level(level)
-  screen.move(64, 32)
+  screen.move(64, 52)
   screen.text_center(hud_text)
 end
 
@@ -598,7 +598,9 @@ function init()
     }
   end
 
-  waveform = Waveform.new(0, 10, 128, 38, NUM_VOICES)
+  -- half the height it used to be, kept on the same centre line so the
+  -- screen stays balanced rather than top heavy
+  waveform = Waveform.new(0, 20, 128, 19, NUM_VOICES)
   for i = 1, NUM_VOICES do
     waveform:set_head_pos(i, voices[i].phase)
   end
