@@ -16,6 +16,7 @@
 engine.name = "Graindr"
 
 local Waveform = include("graindr/lib/waveform")
+local Delay = include("graindr/lib/delay")
 
 local NUM_VOICES = 8
 local LFO_SHAPES = {"sine", "triangle", "saw", "square", "random"}
@@ -481,7 +482,7 @@ end
 
 -- norns renders one level of grouping, so the sections are separators
 function build_params()
-  params:add_group("graindr", 33)
+  params:add_group("graindr", 40)
 
   params:add_separator("sep_sample", "sample")
 
@@ -588,14 +589,43 @@ function build_params()
   params:add_control("volume", "volume", controlspec.new(-60, 20, "db", 0, 0, "dB"))
   params:set_action("volume", function(x) engine.volume(db_to_amp(x)) end)
 
-  params:add_control("reverb_mix", "reverb mix", controlspec.new(0, 1, "lin", 0, 0.3))
-  params:set_action("reverb_mix", function(x) engine.reverb_mix(x) end)
 
-  params:add_control("reverb_room", "reverb room", controlspec.new(0, 1, "lin", 0, 0.5))
-  params:set_action("reverb_room", function(x) engine.reverb_room(x) end)
+  params:add_separator("sep_delay", "delay")
 
-  params:add_control("reverb_damp", "reverb damp", controlspec.new(0, 1, "lin", 0, 0.5))
-  params:set_action("reverb_damp", function(x) engine.reverb_damp(x) end)
+  params:add_control("delay_level", "level", controlspec.new(0, 1, "lin", 0, 0.2))
+  params:set_action("delay_level", function(x) Delay.set_level(x) end)
+
+  params:add_control("delay_time", "time", controlspec.new(0.05, 4, "exp", 0, 0.5, "s"))
+  params:set_action("delay_time", function(x) Delay.set_time(x) end)
+
+  params:add_control("delay_feedback", "feedback", controlspec.new(0, 1, "lin", 0, 0.5))
+  params:set_action("delay_feedback", function(x) Delay.set_feedback(x) end)
+
+  -- rate re-pitches the repeats, which is the tape half of halfsecond
+  params:add_control("delay_rate", "rate", controlspec.new(0.5, 2, "lin", 0, 1))
+  params:set_action("delay_rate", function(x) Delay.set_rate(x) end)
+
+  params:add_control("delay_pan", "pan", controlspec.new(-1, 1, "lin", 0, 0))
+  params:set_action("delay_pan", function(x) Delay.set_pan(x) end)
+
+  params:add_control("delay_fc", "filter", controlspec.new(100, 18000, "exp", 0, 4000, "hz"))
+  params:set_action("delay_fc", function(x) Delay.set_filter_fc(x) end)
+
+  params:add_control("delay_rq", "resonance", controlspec.new(0.1, 4, "exp", 0, 2.0))
+  params:set_action("delay_rq", function(x) Delay.set_filter_rq(x) end)
+
+  -- crone's reverb, shared with the rest of the system. only the sends live
+  -- here; its character stays in SYSTEM > AUDIO rather than existing twice.
+  params:add_separator("sep_reverb", "reverb")
+
+  params:add_control("rev_return", "return", controlspec.new(0, 1, "lin", 0, 1.0))
+  params:set_action("rev_return", function(x) audio.level_rev_dac(x) end)
+
+  params:add_control("rev_dry_send", "dry send", controlspec.new(0, 1, "lin", 0, 0.2))
+  params:set_action("rev_dry_send", function(x) audio.level_eng_rev(x) end)
+
+  params:add_control("rev_delay_send", "delay send", controlspec.new(0, 1, "lin", 0, 0.5))
+  params:set_action("rev_delay_send", function(x) audio.level_cut_rev(x) end)
 
   params:add_separator("sep_midi", "midi")
 
@@ -610,16 +640,13 @@ function build_params()
     for i = 1, NUM_VOICES do apply_pitch(i) end
   end)
 
-  params:add_separator("sep_input", "input")
-
-  params:add_option("monitor", "monitor", {"off", "on"}, 1)
-  params:set_action("monitor", function(x)
-    audio.level_monitor(x == 2 and 1 or 0)
-  end)
 end
 
 function init()
   math.randomseed(math.floor(util.time() * 1000))
+
+  Delay.init()
+  audio.rev_on()
 
   for i = 1, NUM_VOICES do
     row_mode[i] = MODE_ONESHOT
@@ -714,6 +741,13 @@ end
 
 function cleanup()
   if recording then stop_recording() end
+  -- the sends are global state. norns has no getter for them, so the previous
+  -- values cannot be restored — zeroing what this script opened is the most
+  -- it can do. the reverb is left on, since turning it off would be as
+  -- likely wrong as leaving it.
+  Delay.stop()
+  audio.level_cut_rev(0)
+  audio.level_eng_rev(0)
   if cpu_poll then cpu_poll:stop() end
   for i = 1, NUM_VOICES do
     if phase_polls[i] then phase_polls[i]:stop() end

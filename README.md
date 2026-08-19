@@ -4,8 +4,6 @@ A polyphonic granular synth for [norns](https://monome.org/norns).
 
 Eight granular voices read one shared sample. Play it from the grid with no MIDI attached, or send MIDI to transpose voices into chords.
 
-The engine is based on [Engine_Glut](https://github.com/artfwo/glut) by artfwo, adapted for a shared buffer, per-voice LFO modulation of playhead speed, loop points, and a global ADSR.
-
 ## Requirements
 
 - norns
@@ -36,9 +34,9 @@ A press jumps that voice's playhead to that point in the sample and fires one co
 
 **Looping.** Hold one pad and tap another on the same row. The playhead is trapped between the two, and runs in the direction you pressed: left-to-right loops forward, right-to-left loops backward.
 
-A single press anywhere on a braced row frees the brace and plays the one-shot, so getting out of a loop is the same gesture as playing a note. Holding that pad and tapping a second still sets a new brace, which simply replaces the one the press dropped.
+A single press anywhere on a braced row frees the brace and plays the one-shot. Holding that pad and tapping a second sets a new brace in place of the old one.
 
-Braces are cleared whenever the buffer underneath them is replaced — loading a sample, starting a recording, or finishing one — since there is nothing left for them to point at. Any voice held open by a loop is let go at the same time.
+Loading a sample, starting a recording or finishing one clears every brace, and lets go of any voice a loop was holding open.
 
 A brace bounds the playhead in either mode. The control column decides the envelope over it: one-shot plays a single cycle, loop sustains at full level for as long as the brace is set, and only clearing it lets go, fading out over the release time.
 
@@ -64,19 +62,23 @@ Turning a shared param while a voice is sounding pushes the base value to every 
 
 ## Grains
 
-**smooth** is the one dial if you just want it more fluid. It sweeps density, size and scatter together along a grainy-to-liquid axis: at 0% it is pointillist, a scatter of separate events; at 50% it is the default, six grains deep and continuous; past 75% it is a wash. It writes to the three params underneath rather than hiding them, so you can see where it put them and carry on by hand from there — until you move it again, which takes them back.
+**smooth** sweeps density, size and scatter together, from pointillist at 0% through the default at 50% to a wash past 75%. It writes to those three params, so you can carry on by hand from wherever it leaves them.
 
-**density** is how often a voice fires a grain, and **size** is how long each one lasts. Multiplied together they give how many grains overlap at any moment, and that number is what fluid rather than grainy actually means. Below about two you hear individual grains; four to eight is continuous; past twenty it is a wash. 20 Hz at 100 ms is two. The defaults are 40 Hz at 150 ms, which is six.
+**density** is how often a voice fires a grain, **size** is how long each one lasts. Multiplied together they give how many grains overlap: below two you hear individual grains, four to eight is continuous, past twenty is a wash. The defaults are 40 Hz at 150 ms, which is six.
 
-**scatter** is how far each grain's onset and length wander from the clock. At zero the grains fire on an exact grid, and at low densities you hear that grid as a pulse rather than as texture — the machine-gun artifact. A little scatter and the same grains become a cloud. It varies grain length as well as timing, which stops identical overlapping grains comb-filtering against each other.
-
-Each voice runs one grain cloud. The trigger is gated by the envelope, so a voice at rest computes no grains at all — eight voices are allocated from the moment the engine loads, and without that they would all grind through a full grain load whether or not anything was letting the sound out.
-
-Grains are read with cubic interpolation. Every grain of a MIDI note off the root note is a resampled read, so this is audible exactly where it matters — playing it as a synth rather than scrubbing it at unity.
+**scatter** is how far each grain's onset and length wander from the clock. At zero the grains fire on an exact grid, which at low densities is audible as a pulse.
 
 ## LFO
 
 The LFO adds a bipolar offset to playhead speed.
+
+## Delay and reverb
+
+The engine feeds the delay, and both the dry engine and the delay feed the reverb.
+
+**rate** re-pitches the repeats. **filter** is a lowpass on the delay line.
+
+The script sets the sends only. The reverb's own settings are in SYSTEM > AUDIO, and graindr does not put them back as it found them.
 
 ## Params
 
@@ -88,12 +90,14 @@ Everything lives under one **GRAINDR** menu item, in sections:
 
 **voices** attack, decay, sustain, sustain time, release, then the shared voice params — speed, pitch, pan, level, the three LFO controls — and rand amt.
 
-**output** volume and reverb mix, room and damp.
+**output** volume.
+
+**delay** level, time, feedback, rate, pan, filter cutoff and resonance.
+
+**reverb** return level, dry send and delay send.
 
 **midi** channel and root note.
 
-**input** input monitoring.
-
 ## Credits
 
-The granular engine is derived from [glut](https://github.com/artfwo/glut) by artfwo, which is where the `GrainBuf` voice structure, the `Phasor` playhead and the phase polling all come from.
+The granular engine is derived from [glut](https://github.com/artfwo/glut) by artfwo. The delay is after [halfsecond](https://github.com/monome/dust) by @tehn.

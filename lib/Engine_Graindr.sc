@@ -6,6 +6,8 @@
 //   - one shared stereo buffer pair, since graindr draws one waveform
 //   - a control-rate LFO per voice modulating playhead speed
 //   - master volume on the effect synth, freeing \gain for a per-voice level
+//   - no reverb of its own: crone's reverb sits downstream, so the softcut
+//     delay can feed it as well
 //   - waveform summary and buffer info sent to lua over custom OSC
 //   - a global ADSR with a sustain time, in place of Glut's scaled ASR
 //   - the playhead only advances while the envelope is open
@@ -167,11 +169,11 @@ Engine_Graindr : CroneEngine {
 			Out.kr(env_out, env);
 		}).add;
 
+		// master gain only. reverb is crone's, downstream of the engine, so the
+		// delay can feed it too — see lib/delay.lua.
 		SynthDef(\graindr_effect, {
-			arg in, out, mix=0.5, room=0.5, damp=0.5, amp=1;
-			var sig = In.ar(in, 2);
-			sig = FreeVerb.ar(sig, mix, room, damp);
-			Out.ar(out, sig * amp);
+			arg in, out, amp=1;
+			Out.ar(out, In.ar(in, 2) * amp);
 		}).add;
 
 		SynthDef(\graindr_rec, {
@@ -317,10 +319,6 @@ Engine_Graindr : CroneEngine {
 		this.addCommand("volume", "f", { arg msg;
 			effect.set(\amp, msg[1]);
 		});
-
-		this.addCommand("reverb_mix", "f", { arg msg; effect.set(\mix, msg[1]); });
-		this.addCommand("reverb_room", "f", { arg msg; effect.set(\room, msg[1]); });
-		this.addCommand("reverb_damp", "f", { arg msg; effect.set(\damp, msg[1]); });
 
 		// reads at most bufSeconds, the recorder's ceiling. unbounded, an hour long
 		// file would ask the server for gigabytes. longer files are cut, not refused.
