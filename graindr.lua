@@ -22,9 +22,6 @@ local NUM_VOICES = 8
 local LFO_SHAPES = {"sine", "triangle", "saw", "square", "random"}
 local REFRESH = 1 / 15
 local RAND_MAX = 16
--- top of the range reads "inf": the engine just gets a very long sustain node
-local SUSTAIN_INF_AT = 30
-local SUSTAIN_INF = 1e9
 -- grace period after a trigger, before the envelope poll catches up
 local TRIG_GUARD = 0.25
 -- encoder readout: hold at full, then fade
@@ -144,6 +141,16 @@ local function randomize_voice(i)
   voices[i].base_ratio =
     semitones_to_ratio(params:get("pitch") + rand_offset(amt, RAND_MAX))
   apply_pitch(i)
+end
+
+-- a grid press has no gate to close, so its envelope carries its own held
+-- stage. that length is the rest of the envelope summed rather than a control
+-- of its own: a slow attack and long release hold for a while, a fast one does
+-- not.
+local function update_sustain_time()
+  engine.sustain_time(params:get("attack")
+    + params:get("decay")
+    + params:get("release"))
 end
 
 -- one envelope cycle from the parked playhead. braced rows are freed before here.
@@ -482,7 +489,7 @@ end
 
 -- norns renders one level of grouping, so the sections are separators
 function build_params()
-  params:add_group("graindr", 40)
+  params:add_group("graindr", 39)
 
   params:add_separator("sep_sample", "sample")
 
@@ -520,29 +527,25 @@ function build_params()
   params:add_separator("sep_voices", "voices")
 
   params:add_control("attack", "attack", controlspec.new(0.001, 10, "exp", 0, 0.5, "s"))
-  params:set_action("attack", function(x) engine.attack(x) end)
+  params:set_action("attack", function(x)
+    engine.attack(x)
+    update_sustain_time()
+  end)
 
   params:add_control("decay", "decay", controlspec.new(0.001, 10, "exp", 0, 0.3, "s"))
-  params:set_action("decay", function(x) engine.decay(x) end)
+  params:set_action("decay", function(x)
+    engine.decay(x)
+    update_sustain_time()
+  end)
 
   params:add_control("sustain", "sustain", controlspec.new(0, 1, "lin", 0, 1.0))
   params:set_action("sustain", function(x) engine.sustain(x) end)
 
-  -- top of the range is infinite sustain, sent as a very long sustain node.
-  -- the formatter is add_control's fourth argument.
-  params:add_control("sustain_time", "sustain time",
-    controlspec.new(0.05, 30, "exp", 0, 2.0, "s"),
-    function(p)
-      local x = p:get()
-      if x >= SUSTAIN_INF_AT then return "inf" end
-      return string.format("%.2f s", x)
-    end)
-  params:set_action("sustain_time", function(x)
-    engine.sustain_time(x >= SUSTAIN_INF_AT and SUSTAIN_INF or x)
-  end)
-
   params:add_control("release", "release", controlspec.new(0.001, 10, "exp", 0, 1.0, "s"))
-  params:set_action("release", function(x) engine.release(x) end)
+  params:set_action("release", function(x)
+    engine.release(x)
+    update_sustain_time()
+  end)
 
   params:add_control("speed", "speed", controlspec.new(-2, 2, "lin", 0, 1.0, "x"))
   params:set_action("speed", function(x)
