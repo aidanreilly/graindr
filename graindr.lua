@@ -7,7 +7,7 @@
 -- E3 - jitter
 -- K2 - panic
 -- K3 - record
--- grid - trigger, hold+tap to loop
+-- grid - col 1 selects, rest triggers
 -- midi - play the keys
 --
 -- engine based on glut
@@ -35,6 +35,12 @@ local TRIG_GUARD = 0.25
 local HUD_HOLD = 0.4
 local HUD_FADE = 0.4
 
+-- the leftmost column selects a row and sets what its braces do, leaving the
+-- rest of the row for playhead positions
+local CONTROL_COL = 1
+local MODE_ONESHOT = 1
+local MODE_LOOP = 2
+
 local waveform
 local g
 local grid_cols = 16
@@ -47,6 +53,15 @@ local env_polls = {}
 -- this: a second press while a row has an anchor sets a brace between them
 -- instead of triggering a note.
 local grid_anchor = {}
+
+-- what a brace on each row does when it is set: play one envelope inside the
+-- region, or sustain and loop it. mode only governs what the next gesture
+-- does — it never reaches back and stops something already sounding, so a
+-- loop you set going keeps going while you work on another row.
+local row_mode = {}
+-- the row MIDI lands on, or nil for none, in which case allocation falls back
+-- to finding any free voice
+local selected_row = nil
 
 local recording = false
 local rec_time = 0
@@ -84,9 +99,23 @@ local function semitones_to_ratio(st)
   return 2 ^ (st / 12)
 end
 
+-- column 1 is the control column, so positions start at column 2. on a 16
+-- wide grid that leaves 15 steps across the sample.
+local function grid_span()
+  return math.max(grid_cols - CONTROL_COL - 1, 1)
+end
+
 local function grid_pos(x)
-  local span = math.max(grid_cols - 1, 1)
-  return util.clamp((x - 1) / span, 0, 1)
+  return util.clamp((x - CONTROL_COL - 1) / grid_span(), 0, 1)
+end
+
+local function pos_to_grid(pos)
+  return pos * grid_span() + CONTROL_COL + 1
+end
+
+-- slow enough to read as blinking rather than flickering
+local function blink_on()
+  return math.floor(util.time() * 2) % 2 == 0
 end
 
 -- the engine owns the envelope and polls its value back, so this is the real
@@ -166,9 +195,11 @@ local function silence(i)
   engine.panic(i)
 end
 
--- setting a loop takes the ADSR out of the picture: the voice sustains at
--- full level for as long as the loop is set, rather than running out its
--- envelope underneath it.
+-- a brace always bounds the playhead. what the row's control button decides
+-- is the envelope over it: in loop mode the voice sustains at full level for
+-- as long as the brace is set, taking the ADSR out of the picture, while in
+-- one-shot mode the brace only shapes where the playhead runs and the
+-- envelope still plays one cycle and ends.
 local function set_loop(i, ax, bx)
   local v = voices[i]
   local pa, pb = grid_pos(ax), grid_pos(bx)
@@ -176,8 +207,10 @@ local function set_loop(i, ax, bx)
   v.loop_lo, v.loop_hi = math.min(pa, pb), math.max(pa, pb)
   v.loop_dir = (bx > ax) and 1 or -1
   engine.loop(i, v.loop_lo, v.loop_hi, v.loop_dir)
-  engine.hold(i, 1)
-  v.trig_time = util.time()
+  if row_mode[i] == MODE_LOOP then
+    engine.hold(i, 1)
+    v.trig_time = util.time()
+  end
 end
 
 -- clearing the loop lets the sustain go, and the voice fades out over the
@@ -199,12 +232,25 @@ local function clear_all_loops()
   end
 end
 
+-- rows in the order MIDI should try them: from the selected row downward,
+-- wrapping at the bottom, so a chord stacks away from where you are working.
+-- with no row selected this is just top to bottom.
+local function midi_order()
+  local order = {}
+  local start = (selected_row or 1) - 1
+  for n = 0, NUM_VOICES - 1 do
+    order[n + 1] = ((start + n) % NUM_VOICES) + 1
+  end
+  return order
+end
+
 local function allocate_voice()
+  local order = midi_order()
   -- prefer a silent voice, so a new note does not cut off one still ringing
-  for i = 1, NUM_VOICES do
+  for _, i in ipairs(order) do
     if voices[i].midi_note == nil and not sounding(i) then return i end
   end
-  for i = 1, NUM_VOICES do
+  for _, i in ipairs(order) do
     if voices[i].midi_note == nil then return i end
   end
   local oldest, oldest_time = 1, math.huge
@@ -253,6 +299,24 @@ end
 function grid_key(x, y, z)
   if y < 1 or y > NUM_VOICES then return end
 
+  -- the control column cycles one row: dim, lit for one-shot, blinking for
+  -- loop, then back to dim. selecting a row deselects whichever was selected
+  -- before, so there is only ever one row for MIDI to land on, and the cycle
+  -- always starts from one-shot rather than from wherever it was left.
+  if x <= CONTROL_COL then
+    if z == 0 then return end
+    if selected_row ~= y then
+      selected_row = y
+      row_mode[y] = MODE_ONESHOT
+    elseif row_mode[y] == MODE_ONESHOT then
+      row_mode[y] = MODE_LOOP
+    else
+      selected_row = nil
+      row_mode[y] = MODE_ONESHOT
+    end
+    return
+  end
+
   if z == 1 then
     local anchor = grid_anchor[y]
     if anchor == nil then
@@ -270,12 +334,21 @@ end
 
 function grid_refresh()
   g:all(0)
-  local span = math.max(grid_cols - 1, 1)
+  local lit = blink_on()
 
   for i = 1, NUM_VOICES do
     local v = voices[i]
 
-    -- a loop stays visible while the voice is silent, so you can see what a
+    -- the control column always shows at the lowest level, so the column
+    -- reads as a column even with nothing selected. the selected row is full
+    -- brightness, and blinks there if its braces are set to loop.
+    local ctl = 1
+    if selected_row == i then
+      ctl = (row_mode[i] == MODE_LOOP and not lit) and 1 or 15
+    end
+    g:led(CONTROL_COL, i, ctl)
+
+    -- a brace stays visible while the voice is silent, so you can see what a
     -- row is armed to do before you play it
     if v.loop_a then
       local lo = math.min(v.loop_a, v.loop_b)
@@ -288,19 +361,19 @@ function grid_refresh()
     -- the playhead is drawn only while the envelope is open, and fades with
     -- it, so the grid follows the same shape you hear. the dim half of an
     -- interpolated head is skipped rather than written as 0, so it cannot
-    -- punch a hole in the loop markers underneath.
+    -- punch a hole in the brace markers underneath.
     local peak = math.floor(v.env * 15)
     if peak > 0 then
-      local float_x = v.phase * span + 1
+      local float_x = pos_to_grid(v.phase)
       local x_lo = math.floor(float_x)
       local x_hi = x_lo + 1
       local frac = float_x - x_lo
       local l_lo = math.floor((1 - frac) * peak)
       local l_hi = math.floor(frac * peak)
-      if l_lo > 0 and x_lo >= 1 and x_lo <= grid_cols then
+      if l_lo > 0 and x_lo > CONTROL_COL and x_lo <= grid_cols then
         g:led(x_lo, i, l_lo)
       end
-      if l_hi > 0 and x_hi >= 1 and x_hi <= grid_cols then
+      if l_hi > 0 and x_hi > CONTROL_COL and x_hi <= grid_cols then
         g:led(x_hi, i, l_hi)
       end
     end
@@ -626,6 +699,7 @@ function init()
   math.randomseed(math.floor(util.time() * 1000))
 
   for i = 1, NUM_VOICES do
+    row_mode[i] = MODE_ONESHOT
     voices[i] = {
       midi_note = nil,
       midi_time = 0,

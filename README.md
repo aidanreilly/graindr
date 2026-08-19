@@ -28,7 +28,9 @@ graindr holds 60 seconds of audio, which is also as long as it will record in on
 
 ### Grid
 
-Row `n` is voice `n`, and all 16 columns are playhead positions.
+Row `n` is voice `n`. Column 1 is the control column, so the remaining 15 columns are playhead positions.
+
+Pressing a row's control button cycles it: dim is unselected, lit means braces on that row play one-shot, blinking means they sustain and loop. A third press returns it to dim, and only one row is selected at a time. The mode applies to the next gesture, not to anything already sounding.
 
 A press jumps that voice's playhead to that point in the sample and fires one complete cycle of the envelope. 
 
@@ -38,11 +40,11 @@ A single press anywhere on a braced row frees the brace and plays the one-shot, 
 
 Braces are cleared whenever the buffer underneath them is replaced — loading a sample, starting a recording, or finishing one — since there is nothing left for them to point at. Any voice held open by a loop is let go at the same time.
 
-A loop sustains at full level for as long as the loop is set, and only clearing the loop lets it go, fading out over the release time.
+A brace bounds the playhead in either mode. The control column decides the envelope over it: one-shot plays a single cycle, loop sustains at full level for as long as the brace is set, and only clearing it lets go, fading out over the release time.
 
 ### MIDI
 
-A note takes a voice and transposes it relative to the root note param.
+A note takes a voice and transposes it relative to the root note param. A single note sounds the selected row, and a chord takes the rows below it in turn, wrapping at the bottom.
 
 ### Norns
 
