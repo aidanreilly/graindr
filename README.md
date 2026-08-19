@@ -70,11 +70,7 @@ Turning a shared param while a voice is sounding pushes the base value to every 
 
 **scatter** is how far each grain's onset and length wander from the clock. At zero the grains fire on an exact grid, and at low densities you hear that grid as a pulse rather than as texture — the machine-gun artifact. A little scatter and the same grains become a cloud. It varies grain length as well as timing, which stops identical overlapping grains comb-filtering against each other.
 
-**grains** is a different axis. It runs up to four parallel grain clouds over the same playhead, each with its own clock, its own jitter and its own pan, rather than making one cloud fire faster. Every stream runs a few percent off its neighbours, so they never settle into the shared onset grid that a single faster clock gives you — turning it up thickens and diffuses rather than just adding density. The mix is compensated by the square root of the count, since the streams are uncorrelated, so it should stay at roughly the same level as you go.
-
-All four streams exist in the synth graph whether you use them or not, but an unused one has its trigger held at zero, and a `GrainBuf` with no triggers has no grains to iterate — so an idle stream costs its empty per-block overhead and nothing more.
-
-The same gate carries the envelope, so a voice at rest computes no grains at all. That matters more than it sounds: eight voices are allocated from the moment the engine loads, and without it they would all grind through a full grain load whether or not anything was letting the sound out.
+Each voice runs one grain cloud. The trigger is gated by the envelope, so a voice at rest computes no grains at all — eight voices are allocated from the moment the engine loads, and without that they would all grind through a full grain load whether or not anything was letting the sound out.
 
 Grains are read with cubic interpolation. Every grain of a MIDI note off the root note is a resampled read, so this is audible exactly where it matters — playing it as a synth rather than scrubbing it at unity.
 
@@ -88,7 +84,7 @@ Everything lives under one **GRAINDR** menu item, in sections:
 
 **sample** the sample file.
 
-**grains** smooth, grains, density, grain size, scatter, jitter, spread.
+**grains** smooth, density, grain size, scatter, jitter, spread.
 
 **voices** attack, decay, sustain, sustain time, release, then the shared voice params — speed, pitch, pan, level, the three LFO controls — and rand amt.
 

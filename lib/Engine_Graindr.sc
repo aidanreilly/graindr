@@ -11,16 +11,12 @@
 //   - the playhead only advances while the envelope is open
 //   - the envelope value is polled back to lua, which fades the playhead
 //   - loop points per voice, with a direction
-//   - up to four parallel grain streams per voice, selected by \grains
 //   - \scatter, varying the clock period and each grain's length
 //   - Glut's \freeze argument and level_N polls removed as unused here
 
 Engine_Graindr : CroneEngine {
 	classvar nvoices = 8;
 	classvar bufSeconds = 60;
-	// every stream is in the graph whether used or not; \grains selects from these
-	classvar maxStreams = 4;
-
 	var pg;
 	var effect;
 	var <bufL;
@@ -61,12 +57,18 @@ Engine_Graindr : CroneEngine {
 			arg out, phase_out, env_out, buf_l, buf_r,
 			gate=0, hold=0, t_trig=0, sustain_time=2, pos=0, t_reset_pos=0,
 			speed=1, pitch=1, pan=0, gain=1,
-			size=0.1, density=20, jitter=0, spread=0, grains=1, scatter=0,
+			size=0.1, density=20, jitter=0, spread=0, scatter=0,
 			attack=0.5, decay=0.3, sustain=1.0, release=1.0,
 			lfo_shape=0, lfo_rate=0.2, lfo_depth=0,
 			loop_lo=0, loop_hi=1, loop_dir=1;
 
-			var streams;
+			var slot;
+			var grain_trig;
+			var grain_dur;
+			var jitter_sig;
+			var pan_sig;
+			var sig_l;
+			var sig_r;
 			var buf_dur;
 			var lfo_sig;
 			var eff_speed;
@@ -132,53 +134,32 @@ Engine_Graindr : CroneEngine {
 			// loop needs a real modulo to pull it in
 			pos_sig = Wrap.kr(buf_pos, loop_lo, loop_hi);
 
-			// One playhead, several grain clouds over it. The graph is static, so
-			// every stream is built; an unused one has its trigger zeroed, and a
-			// GrainBuf with no triggers has no grains to iterate.
-			//
-			// The same gate carries `running`, so a voice at rest computes no grains
-			// at all — otherwise eight idle voices would cost eight playing ones.
+			// a plain Impulse fires on an exact grid, which at low densities is
+			// audible as a pulse. LFNoise0 gives each period its own length, so
+			// onsets land anywhere in their slot. midiratio, so the period is
+			// scaled symmetrically and never reaches zero.
+			slot = (LFNoise0.kr(density) * scatter * 12).midiratio;
+
+			// `running` gates the trigger, so a voice at rest computes no grains at
+			// all — otherwise eight idle voices would cost eight playing ones.
 			// Grains in flight still finish, so this cannot click.
-			//
-			// Each stream's clock runs a few percent off its neighbours and starts at
-			// a different phase, so they never lock into a common onset grid. Jitter
-			// and pan are per stream, which is what diffuses the cloud.
-			streams = Array.fill(maxStreams, { arg k;
-				var active = (grains > k) * running;
-				var base = density * (1 + (k * 0.037));
-				var slot;
-				var trig;
-				var dur;
-				var jitter_sig;
-				var pan_sig;
-				var l;
-				var r;
+			grain_trig = Impulse.kr(density * slot) * running;
 
-				// a plain Impulse fires on an exact grid, which at low densities is
-				// audible as a pulse. LFNoise0 gives each period its own length, so
-				// onsets land anywhere in their slot. midiratio, so the period is
-				// scaled symmetrically and never reaches zero.
-				slot = (LFNoise0.kr(base) * scatter * 12).midiratio;
-				trig = Impulse.kr(base * slot, k / maxStreams) * active;
+			// grains get their own lengths too: identical overlapping grains
+			// comb-filter against each other, varied ones do not
+			grain_dur = size * (TRand.kr(grain_trig, -1, 1) * scatter * 6).midiratio;
 
-				// grains get their own lengths too: identical overlapping grains
-				// comb-filter against each other, varied ones do not
-				dur = size * (TRand.kr(trig, -1, 1) * scatter * 6).midiratio;
+			jitter_sig = TRand.kr(grain_trig,
+				buf_dur.reciprocal.neg * jitter,
+				buf_dur.reciprocal * jitter);
+			pan_sig = TRand.kr(grain_trig, spread.neg, spread);
 
-				jitter_sig = TRand.kr(trig,
-					buf_dur.reciprocal.neg * jitter,
-					buf_dur.reciprocal * jitter);
-				pan_sig = TRand.kr(trig, spread.neg, spread);
+			// cubic, not linear: every grain of a MIDI note off the root is a
+			// resampled read
+			sig_l = GrainBuf.ar(1, grain_trig, grain_dur, buf_l, pitch, pos_sig + jitter_sig, 4);
+			sig_r = GrainBuf.ar(1, grain_trig, grain_dur, buf_r, pitch, pos_sig + jitter_sig, 4);
 
-				// cubic, not linear: every grain of a MIDI note off the root is a
-				// resampled read
-				l = GrainBuf.ar(1, trig, dur, buf_l, pitch, pos_sig + jitter_sig, 4);
-				r = GrainBuf.ar(1, trig, dur, buf_r, pitch, pos_sig + jitter_sig, 4);
-				Balance2.ar(l, r, pan + pan_sig);
-			});
-
-			// square root, not 1/n: uncorrelated streams sum by the square root
-			sig_mix = Mix(streams) * grains.sqrt.reciprocal;
+			sig_mix = Balance2.ar(sig_l, sig_r, pan + pan_sig);
 
 			Out.ar(out, sig_mix * env * gain);
 			Out.kr(phase_out, pos_sig);
@@ -299,10 +280,6 @@ Engine_Graindr : CroneEngine {
 
 		this.addCommand("density", "f", { arg msg;
 			voices.do({ arg v; v.set(\density, msg[1]) });
-		});
-
-		this.addCommand("grains", "i", { arg msg;
-			voices.do({ arg v; v.set(\grains, msg[1]) });
 		});
 
 		this.addCommand("scatter", "f", { arg msg;

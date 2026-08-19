@@ -21,8 +21,6 @@ local NUM_VOICES = 8
 local LFO_SHAPES = {"sine", "triangle", "saw", "square", "random"}
 local REFRESH = 1 / 15
 local RAND_MAX = 16
--- must match maxStreams in Engine_Graindr.sc
-local MAX_STREAMS = 4
 -- top of the range reads "inf": the engine just gets a very long sustain node
 local SUSTAIN_INF_AT = 30
 local SUSTAIN_INF = 1e9
@@ -60,7 +58,7 @@ local rec_metro
 local hud_text = nil
 local hud_time = 0
 
--- scsynth load. grains, density and size all multiply into one core's budget.
+-- scsynth load. density and size multiply into one core's budget.
 local cpu_load = 0
 local cpu_poll
 
@@ -483,7 +481,7 @@ end
 
 -- norns renders one level of grouping, so the sections are separators
 function build_params()
-  params:add_group("graindr", 34)
+  params:add_group("graindr", 33)
 
   params:add_separator("sep_sample", "sample")
 
@@ -499,10 +497,6 @@ function build_params()
   -- one dial along the grainy-to-fluid axis, writing to the params underneath
   params:add_control("smooth", "smooth", controlspec.new(0, 100, "lin", 0, 50, "%"))
   params:set_action("smooth", function(x) apply_smooth(x / 100) end)
-
-  -- parallel clouds over the one playhead, each with its own jitter and pan
-  params:add_number("grains", "grains", 1, MAX_STREAMS, 1)
-  params:set_action("grains", function(x) engine.grains(x) end)
 
   -- density x size is the overlap, which is what fluid means. defaults sit at six.
   params:add_control("density", "density", controlspec.new(1, 512, "exp", 0, 40, "hz"))
