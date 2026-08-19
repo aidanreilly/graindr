@@ -678,9 +678,6 @@ function init()
 
   osc.event = function(path, args)
     if path == "/graindr/waveform" then
-      -- TEMPORARY: tracing why a newly loaded sample can leave the previous
-      -- waveform on screen. remove once that is understood.
-      print("graindr: waveform received, " .. tostring(#args) .. " args")
       waveform:set_samples(args)
     elseif path == "/graindr/buf_info" then
       local frames, sr, truncated = args[1], args[2], args[3]

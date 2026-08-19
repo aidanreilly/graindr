@@ -432,9 +432,6 @@ Engine_Graindr : CroneEngine {
 				});
 				scale = if(peak > 0.01, { 1.0 / peak }, { 1.0 });
 
-				("Engine_Graindr: waveform " ++ data.size ++ " frames, peak "
-					++ peak.round(0.001)).postln;
-
 				// bounds from the true fractional width, not a truncated integer:
 				// the last columns are not dropped, and a buffer under 128 frames
 				// still fills the display
