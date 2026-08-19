@@ -23,20 +23,16 @@ local REFRESH = 1 / 15
 local RAND_MAX = 16
 -- must match maxStreams in Engine_Graindr.sc
 local MAX_STREAMS = 4
--- sustain time reads "inf" at the top of its range, sent to the engine as a
--- sustain node long enough that nothing will outlast it
+-- top of the range reads "inf": the engine just gets a very long sustain node
 local SUSTAIN_INF_AT = 30
 local SUSTAIN_INF = 1e9
--- the envelope poll runs at REFRESH, so a voice needs a short grace period
--- after a trigger before the polled envelope can be trusted to say it is alive
+-- grace period after a trigger, before the envelope poll catches up
 local TRIG_GUARD = 0.25
--- the encoder readout sits at full brightness while you are still turning,
--- then fades out over about the same time again
+-- encoder readout: hold at full, then fade
 local HUD_HOLD = 0.4
 local HUD_FADE = 0.4
 
--- the leftmost column selects a row and sets what its braces do, leaving the
--- rest of the row for playhead positions
+-- column 1 selects a row and sets its brace mode
 local CONTROL_COL = 1
 local MODE_ONESHOT = 1
 local MODE_LOOP = 2
@@ -49,18 +45,12 @@ local voices = {}
 local phase_polls = {}
 local env_polls = {}
 
--- x of the first pad held down on each row, or nil. the loop gesture reads
--- this: a second press while a row has an anchor sets a brace between them
--- instead of triggering a note.
+-- first pad held on each row; a second press while it is held sets a brace
 local grid_anchor = {}
 
--- what a brace on each row does when it is set: play one envelope inside the
--- region, or sustain and loop it. mode only governs what the next gesture
--- does — it never reaches back and stops something already sounding, so a
--- loop you set going keeps going while you work on another row.
+-- per-row brace mode. governs the next gesture only, so a running loop survives.
 local row_mode = {}
--- the row MIDI lands on, or nil for none, in which case allocation falls back
--- to finding any free voice
+-- row MIDI lands on, or nil to fall back to any free voice
 local selected_row = nil
 
 local recording = false
@@ -70,20 +60,16 @@ local rec_metro
 local hud_text = nil
 local hud_time = 0
 
--- scsynth's average load, polled from crone. grains, density and size all
--- multiply into the same budget on one core, so this is the number to watch
--- while pushing them.
+-- scsynth load. grains, density and size all multiply into one core's budget.
 local cpu_load = 0
 local cpu_poll
 
--- the smooth macro writes to other params, which must not happen while init
--- is still banging them into place
+-- the smooth macro writes to other params; not while init is still banging
 local params_ready = false
 
 local sample_name = ""
 local sample_duration = 0
--- the engine loads at most MAX_SAMPLE_SECONDS of a file. a longer one is cut
--- rather than refused, and the duration is marked so it is not a silent lie.
+-- longer files are cut to this, and the duration is marked
 local MAX_SAMPLE_SECONDS = 60
 local sample_truncated = false
 
@@ -99,8 +85,7 @@ local function semitones_to_ratio(st)
   return 2 ^ (st / 12)
 end
 
--- column 1 is the control column, so positions start at column 2. on a 16
--- wide grid that leaves 15 steps across the sample.
+-- positions start after the control column: 15 steps on a 16 wide grid
 local function grid_span()
   return math.max(grid_cols - CONTROL_COL - 1, 1)
 end
@@ -113,14 +98,12 @@ local function pos_to_grid(pos)
   return pos * grid_span() + CONTROL_COL + 1
 end
 
--- slow enough to read as blinking rather than flickering
+-- slow enough to read as a blink
 local function blink_on()
   return math.floor(util.time() * 2) % 2 == 0
 end
 
--- the engine owns the envelope and polls its value back, so this is the real
--- amplitude of the voice rather than an estimate of it. the guard covers the
--- gap between firing a trigger and the first poll that reflects it.
+-- the polled envelope is the real amplitude. the guard covers poll lag.
 local function sounding(i)
   local v = voices[i]
   return v.midi_note ~= nil
@@ -128,8 +111,7 @@ local function sounding(i)
     or (util.time() - v.trig_time) < TRIG_GUARD
 end
 
--- MIDI transposition multiplies the voice's own pitch rather than replacing
--- it, so a voice detuned by the pitch param keeps its character
+-- transposition multiplies the voice's pitch rather than replacing it
 local function apply_pitch(i)
   local v = voices[i]
   if v.midi_note then
@@ -139,16 +121,13 @@ local function apply_pitch(i)
   end
 end
 
--- rand amt spreads a bipolar offset across each voice param, scaled to that
--- param's own useful range. at 0 every voice is identical.
+-- bipolar offset scaled to each param's range. at 0 every voice is identical.
 local function rand_offset(amt, range)
   if amt <= 0 then return 0 end
   return (math.random() * 2 - 1) * range * (amt / RAND_MAX)
 end
 
--- the voice params are shared by all eight voices, so the variation between
--- them comes from here: fresh offsets are rolled for the voice being
--- triggered, which is why repeated hits on one pad never sound quite alike.
+-- voice params are shared, so this is what makes voices differ. rolled per trigger.
 local function randomize_voice(i)
   local amt = params:get("rand_amt")
 
@@ -168,10 +147,7 @@ local function randomize_voice(i)
   apply_pitch(i)
 end
 
--- every voice starts from rest. a trigger rolls its random offsets, parks the
--- playhead at the last position seeked on the grid, and fires one envelope
--- cycle that runs itself out. a braced row is unbraced before it gets here,
--- so a trigger is always the one-shot.
+-- one envelope cycle from the parked playhead. braced rows are freed before here.
 local function trigger(i)
   local v = voices[i]
   randomize_voice(i)
@@ -195,11 +171,7 @@ local function silence(i)
   engine.panic(i)
 end
 
--- a brace always bounds the playhead. what the row's control button decides
--- is the envelope over it: in loop mode the voice sustains at full level for
--- as long as the brace is set, taking the ADSR out of the picture, while in
--- one-shot mode the brace only shapes where the playhead runs and the
--- envelope still plays one cycle and ends.
+-- a brace always bounds the playhead; the row mode decides the envelope over it
 local function set_loop(i, ax, bx)
   local v = voices[i]
   local pa, pb = grid_pos(ax), grid_pos(bx)
@@ -213,8 +185,7 @@ local function set_loop(i, ax, bx)
   end
 end
 
--- clearing the loop lets the sustain go, and the voice fades out over the
--- release time
+-- releasing the sustain fades the voice out over the release time
 local function clear_loop(i)
   local v = voices[i]
   v.loop_a, v.loop_b = nil, nil
@@ -223,18 +194,14 @@ local function clear_loop(i)
   engine.hold(i, 0)
 end
 
--- a brace marks a region of the sample. when the buffer underneath it is
--- replaced there is nothing left for it to point at, so every loop is
--- dropped and the voices holding them are let go.
+-- braces point into a buffer that is about to be replaced
 local function clear_all_loops()
   for i = 1, NUM_VOICES do
     if voices[i].loop_a then clear_loop(i) end
   end
 end
 
--- rows in the order MIDI should try them: from the selected row downward,
--- wrapping at the bottom, so a chord stacks away from where you are working.
--- with no row selected this is just top to bottom.
+-- from the selected row downward, wrapping. top to bottom when none is selected.
 local function midi_order()
   local order = {}
   local start = (selected_row or 1) - 1
@@ -289,20 +256,13 @@ function midi_event(data)
   end
 end
 
--- one pad is a note. two pads on a row are a loop: hold the first, tap the
--- second, and the playhead runs between them in the direction you pressed.
---
--- a single press on a braced row frees the brace and plays the one-shot, so
--- the way out of a loop is the same gesture as the way into a note. holding
--- that pad and tapping a second still sets a new brace, which simply replaces
--- the one the press just dropped.
+-- one pad triggers. hold one and tap another to brace, in the direction pressed.
+-- a single press on a braced row frees the brace and triggers.
 function grid_key(x, y, z)
   if y < 1 or y > NUM_VOICES then return end
 
-  -- the control column cycles one row: dim, lit for one-shot, blinking for
-  -- loop, then back to dim. selecting a row deselects whichever was selected
-  -- before, so there is only ever one row for MIDI to land on, and the cycle
-  -- always starts from one-shot rather than from wherever it was left.
+  -- dim, lit for one-shot, blinking for loop, then dim. selection is exclusive,
+  -- and the cycle always restarts from one-shot.
   if x <= CONTROL_COL then
     if z == 0 then return end
     if selected_row ~= y then
@@ -339,17 +299,14 @@ function grid_refresh()
   for i = 1, NUM_VOICES do
     local v = voices[i]
 
-    -- the control column always shows at the lowest level, so the column
-    -- reads as a column even with nothing selected. the selected row is full
-    -- brightness, and blinks there if its braces are set to loop.
+    -- lowest level throughout, full on the selected row, blinking there for loop
     local ctl = 1
     if selected_row == i then
       ctl = (row_mode[i] == MODE_LOOP and not lit) and 1 or 15
     end
     g:led(CONTROL_COL, i, ctl)
 
-    -- a brace stays visible while the voice is silent, so you can see what a
-    -- row is armed to do before you play it
+    -- braces stay visible while the voice is silent
     if v.loop_a then
       local lo = math.min(v.loop_a, v.loop_b)
       local hi = math.max(v.loop_a, v.loop_b)
@@ -358,10 +315,8 @@ function grid_refresh()
       g:led(v.loop_b, i, 4)
     end
 
-    -- the playhead is drawn only while the envelope is open, and fades with
-    -- it, so the grid follows the same shape you hear. the dim half of an
-    -- interpolated head is skipped rather than written as 0, so it cannot
-    -- punch a hole in the brace markers underneath.
+    -- drawn only while the envelope is open, fading with it. zero levels are
+    -- skipped so the dim half cannot erase a brace marker.
     local peak = math.floor(v.env * 15)
     if peak > 0 then
       local float_x = pos_to_grid(v.phase)
@@ -382,9 +337,7 @@ function grid_refresh()
   g:refresh()
 end
 
--- what the encoder just changed, in the band between the waveform and the
--- sample name. it is laid on a black plate so nothing behind it can make it
--- unreadable, and it is gone a second after you stop turning.
+-- what the encoder just changed, on a black plate below the waveform
 local function draw_hud()
   if hud_text == nil then return end
 
@@ -414,8 +367,7 @@ function redraw()
   screen.move(0, 7)
   screen.text("GRAINDR")
 
-  -- dim until it is worth looking at, so it does not compete with the
-  -- waveform until you are actually near the edge
+  -- dim until it is worth looking at
   screen.level(cpu_load >= 80 and 15 or 3)
   screen.move(64, 7)
   screen.text_center(string.format("%d%%", math.floor(cpu_load + 0.5)))
@@ -445,8 +397,7 @@ function redraw()
     local mins = math.floor(sample_duration / 60)
     local secs = math.floor(sample_duration % 60)
     screen.move(128, 63)
-    -- a leading * means the file was longer than the engine will hold and
-    -- only its first MAX_SAMPLE_SECONDS are loaded
+    -- * means the file was longer than the engine holds
     screen.text_right(string.format("%s%d:%02d",
       sample_truncated and "*" or "", mins, secs))
   end
@@ -465,8 +416,7 @@ function enc(n, d)
   end
   if id then
     params:delta(id, d)
-    -- params:string is what the params menu itself renders with, so the
-    -- readout carries the same units and rounding you would see in there
+    -- params:string gives the same units and rounding as the params menu
     hud_text = id .. "  " .. params:string(id)
     hud_time = util.time()
   end
@@ -503,8 +453,7 @@ end
 function stop_recording()
   recording = false
   rec_metro:stop()
-  -- the trim rescales every position in the buffer, so a brace set while
-  -- recording would end up pointing somewhere else entirely
+  -- the trim rescales every position, so a brace set while recording would move
   clear_all_loops()
   -- the engine trims its 60s capture buffer down to this duration
   engine.rec_stop(rec_time)
@@ -512,11 +461,8 @@ function stop_recording()
   sample_duration = rec_time
 end
 
--- The smooth macro sweeps density and size exponentially, so overlap — their
--- product, and the thing you actually hear as fluidity — runs from under one
--- grain at a time up to a wash of dozens. At the midpoint it lands on the
--- defaults, which is why moving it from 50% is a departure rather than a
--- correction.
+-- sweeps density and size exponentially, so overlap runs from under one grain
+-- to a wash. the midpoint is the defaults.
 local SMOOTH_MAP = {
   density = {15, 105},
   size = {50, 450},
@@ -524,13 +470,9 @@ local SMOOTH_MAP = {
 }
 
 local function apply_smooth(t)
-  -- suppressed until init has finished banging: this writes to three other
-  -- params, and at bang time they are already at their own defaults, which
-  -- are the ones the macro's midpoint was chosen to match.
-  --
-  -- a pset load is safe without a guard, because smooth is added before the
-  -- three params it writes. a pset is read in param order, so the macro fires
-  -- first and the stored density, size and scatter land on top of it.
+  -- not while init is banging: the defaults already stand. a pset needs no guard
+  -- either, since smooth is added before the params it writes, so a pset read in
+  -- param order lands the stored values on top.
   if not params_ready then return end
 
   local function sweep(lo, hi) return lo * ((hi / lo) ^ t) end
@@ -539,9 +481,7 @@ local function apply_smooth(t)
   params:set("scatter", util.linlin(0, 1, SMOOTH_MAP.scatter[1], SMOOTH_MAP.scatter[2], t))
 end
 
--- norns renders one level of grouping, so the sections inside GRAINDR are
--- separators rather than nested groups. everything the script owns lives
--- under the one menu item.
+-- norns renders one level of grouping, so the sections are separators
 function build_params()
   params:add_group("graindr", 34)
 
@@ -556,28 +496,22 @@ function build_params()
 
   params:add_separator("sep_grains", "grains")
 
-  -- one dial along the grainy-to-fluid axis, moving density, size and scatter
-  -- together. it writes to those params rather than shadowing them, so you
-  -- can see where it put them and carry on by hand from there.
+  -- one dial along the grainy-to-fluid axis, writing to the params underneath
   params:add_control("smooth", "smooth", controlspec.new(0, 100, "lin", 0, 50, "%"))
   params:set_action("smooth", function(x) apply_smooth(x / 100) end)
 
-  -- parallel grain clouds over the one playhead, not a faster clock. each
-  -- stream draws its own jitter and pan, so this thickens and diffuses where
-  -- density only makes the same cloud denser.
+  -- parallel clouds over the one playhead, each with its own jitter and pan
   params:add_number("grains", "grains", 1, MAX_STREAMS, 1)
   params:set_action("grains", function(x) engine.grains(x) end)
 
-  -- density x size is how many grains overlap at once, which is what fluid
-  -- rather than grainy actually means. the defaults sit at six.
+  -- density x size is the overlap, which is what fluid means. defaults sit at six.
   params:add_control("density", "density", controlspec.new(1, 512, "exp", 0, 40, "hz"))
   params:set_action("density", function(x) engine.density(x) end)
 
   params:add_control("size", "size", controlspec.new(1, 2000, "exp", 0, 150, "ms"))
   params:set_action("size", function(x) engine.size(x / 1000) end)
 
-  -- how far each grain's onset and length wander from the clock. at zero the
-  -- grain rate is audible as a pulse; a little of this and it is texture.
+  -- how far onsets and lengths wander from the clock. at 0 the rate is audible.
   params:add_control("scatter", "scatter", controlspec.new(0, 100, "lin", 0, 30, "%"))
   params:set_action("scatter", function(x) engine.scatter(x / 100) end)
 
@@ -587,8 +521,7 @@ function build_params()
   params:add_control("spread", "spread", controlspec.new(0, 100, "lin", 0, 0, "%"))
   params:set_action("spread", function(x) engine.spread(x / 100) end)
 
-  -- one set of voice params shared by all eight voices. rand amt is what
-  -- makes them differ: it is applied per voice as each one is triggered.
+  -- one set of params for all eight voices; rand amt is what makes them differ
   params:add_separator("sep_voices", "voices")
 
   params:add_control("attack", "attack", controlspec.new(0.001, 10, "exp", 0, 0.5, "s"))
@@ -600,12 +533,8 @@ function build_params()
   params:add_control("sustain", "sustain", controlspec.new(0, 1, "lin", 0, 1.0))
   params:set_action("sustain", function(x) engine.sustain(x) end)
 
-  -- the top of the range is infinite sustain: a press holds at the sustain
-  -- level until you press again or hit K2. the engine needs no special case
-  -- for it, since a sustain node long enough is indistinguishable from one
-  -- that never ends.
-  -- the formatter is the fourth argument to add_control, which Control passes
-  -- to its constructor and calls with the param itself
+  -- top of the range is infinite sustain, sent as a very long sustain node.
+  -- the formatter is add_control's fourth argument.
   params:add_control("sustain_time", "sustain time",
     controlspec.new(0.05, 30, "exp", 0, 2.0, "s"),
     function(p)
@@ -716,8 +645,7 @@ function init()
     }
   end
 
-  -- half the height it used to be, kept on the same centre line so the
-  -- screen stays balanced rather than top heavy
+  -- half height, same centre line
   waveform = Waveform.new(0, 20, 128, 19, NUM_VOICES)
   for i = 1, NUM_VOICES do
     waveform:set_head_pos(i, voices[i].phase)
@@ -742,8 +670,7 @@ function init()
     end
   end
 
-  -- playhead position and envelope both come from the engine, which owns the
-  -- Phasor and the ADSR. no dead reckoning on the lua side.
+  -- position and envelope come from the engine. no dead reckoning here.
   for i = 1, NUM_VOICES do
     local p = poll.set("phase_" .. i, function(val)
       voices[i].phase = val
@@ -761,8 +688,7 @@ function init()
     env_polls[i] = e
   end
 
-  -- slower than the ui: an average does not need redrawing every frame, and
-  -- the point of the meter is to not cost anything itself
+  -- an average does not need redrawing every frame
   cpu_poll = poll.set("cpu_avg", function(val) cpu_load = val end)
   cpu_poll.time = 0.25
   cpu_poll:start()

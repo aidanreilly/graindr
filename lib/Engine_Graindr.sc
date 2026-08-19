@@ -3,30 +3,22 @@
 // Based on Engine_Glut by artfwo <https://github.com/artfwo/glut>.
 //
 // Differences from Glut:
-//   - one shared stereo buffer pair for all voices, rather than a buffer per
-//     voice, because graindr draws a single waveform with eight playheads
-//   - a control-rate LFO per voice modulating playhead speed bipolarly
+//   - one shared stereo buffer pair, since graindr draws one waveform
+//   - a control-rate LFO per voice modulating playhead speed
 //   - master volume on the effect synth, freeing \gain for a per-voice level
 //   - waveform summary and buffer info sent to lua over custom OSC
-//   - a global ADSR replaces Glut's envscale-scaled ASR, with a sustain time
-//     so a single grid press plays one complete envelope cycle
-//   - the playhead only advances while the envelope is open, so a voice at
-//     rest is silent and stationary rather than free-running
-//   - the envelope value is polled back to lua, which fades the playhead on
-//     screen and grid along the same curve you hear
-//   - loop points per voice, with a direction, so a grid gesture can trap a
-//     playhead in a region and run it either way through it
-//   - up to four parallel grain streams per voice over the one playhead,
-//     selected by \grains, each with its own clock, jitter and pan
-//   - \scatter, which varies both the grain clock period and each grain's
-//     length, so the grain rate stops being audible as a pulse
+//   - a global ADSR with a sustain time, in place of Glut's scaled ASR
+//   - the playhead only advances while the envelope is open
+//   - the envelope value is polled back to lua, which fades the playhead
+//   - loop points per voice, with a direction
+//   - up to four parallel grain streams per voice, selected by \grains
+//   - \scatter, varying the clock period and each grain's length
 //   - Glut's \freeze argument and level_N polls removed as unused here
 
 Engine_Graindr : CroneEngine {
 	classvar nvoices = 8;
 	classvar bufSeconds = 60;
-	// parallel grain streams per voice. every one is in the graph whether it
-	// is used or not, so this is the ceiling the \grains argument selects from
+	// every stream is in the graph whether used or not; \grains selects from these
 	classvar maxStreams = 4;
 
 	var pg;
@@ -44,11 +36,8 @@ Engine_Graindr : CroneEngine {
 		^super.new(context, doneCallback);
 	}
 
-	// Swap in a new buffer pair, repoint every voice at it, then free the old
-	// pair. bufL and bufR are always distinct Buffer objects: they are shared
-	// across all eight voices and are recorded into, so aliasing them for a
-	// mono file would double-free on the next load and would collapse both
-	// channels of a recording into one buffer.
+	// bufL and bufR are always distinct Buffers: aliasing them for a mono file
+	// would double-free on the next load and collapse a recording into one channel.
 	swapBuffers { arg newL, newR;
 		var oldL = bufL;
 		var oldR = bufR;
@@ -60,12 +49,9 @@ Engine_Graindr : CroneEngine {
 	}
 
 	alloc {
-		// Crone.remoteAddr (port 8888) is matron's *internal* report channel —
-		// oracle.cc registers handlers only for specific /report/* and
-		// /crone/ready paths there, with no wildcard fallback, so custom
-		// paths sent to it are silently dropped by liblo. matron's generic
-		// OSC receiver that actually forwards to lua's osc.event listens on
-		// args_remote_port() instead, which defaults to 10111.
+		// not Crone.remoteAddr (8888): that registers handlers only for specific
+		// /report/* paths, so custom paths are dropped. matron's generic receiver,
+		// the one that reaches lua's osc.event, is args_remote_port, default 10111.
 		matronAddr = NetAddr("127.0.0.1", 10111);
 
 		bufL = Buffer.alloc(context.server, context.server.sampleRate * bufSeconds, 1);
@@ -95,8 +81,7 @@ Engine_Graindr : CroneEngine {
 
 			buf_dur = BufDur.kr(buf_l);
 
-			// bipolar, -1 to 1 in every shape, so lfo_depth means the same
-			// thing whichever shape is selected
+			// bipolar in every shape, so lfo_depth means one thing throughout
 			lfo_sig = Select.kr(lfo_shape, [
 				SinOsc.kr(lfo_rate),
 				LFTri.kr(lfo_rate),
@@ -105,52 +90,37 @@ Engine_Graindr : CroneEngine {
 				LFNoise0.kr(lfo_rate)
 			]);
 
-			// three envelopes over the same values, combined with max so none
-			// of them can close another.
-			//
-			// held_env sustains for as long as a MIDI note holds it open.
-			// A negative gate forces an immediate release, which is how panic
-			// cuts a voice short.
+			// three envelopes over the same values, maxed so none can close another.
+			// held_env is a MIDI note; a negative gate force-releases it, which is panic.
 			held_env = EnvGen.kr(
 				Env.adsr(attack, decay, sustain, release),
 				gate: gate);
 
-			// shot_env is one complete cycle fired by a grid press. the Env
-			// has no sustain node, so t_trig acts as a trigger: it runs
-			// A-D-S-R once and ends on its own, and a second press during the
-			// sustain restarts it from the attack rather than being swallowed
-			// by an already-open gate.
+			// shot_env is one cycle from a grid press. no sustain node, so t_trig is a
+			// trigger: it ends on its own, and a second press restarts the attack.
 			shot_env = EnvGen.kr(
 				Env.new([0, 1, sustain, sustain, 0],
 					[attack, decay, sustain_time, release], -4),
 				gate: t_trig);
 
-			// hold_env is a looping voice. A loop takes the ADSR out of the
-			// picture: decay and sustain level do not apply and nothing runs
-			// out, so the voice sustains at full level for as long as the loop
-			// is set. Attack and release times are kept only as the ramps in
-			// and out, so engaging and clearing a loop does not click.
+			// hold_env is a looping voice: full level, no decay or sustain level,
+			// nothing running out. attack and release stay as the ramps in and out.
 			hold_env = EnvGen.kr(
 				Env.asr(attack, 1.0, release, -4),
 				gate: hold);
 
 			env = held_env.max(shot_env).max(hold_env);
 
-			// the playhead exists only while the voice is sounding. it starts
-			// moving on the attack and freezes where it stands the moment the
-			// release runs out, so a voice at rest shows nothing on the grid
-			// or the screen until it is triggered again.
+			// the playhead runs only while the voice sounds, and freezes where it
+			// stands when the release runs out
 			running = env > 0.0001;
 
-			// the sum swings through zero at depth > |speed|, which is what
-			// reverses the playhead. loop_dir flips the whole thing, so a
-			// right-to-left grid gesture scans its loop backwards.
+			// the sum swings through zero at depth > |speed|, reversing the playhead.
+			// loop_dir flips it, so a right-to-left gesture scans backwards.
 			eff_speed = (speed + (lfo_sig * lfo_depth)) * loop_dir * running;
 
-			// Phasor wraps between start and end, so the loop needs no extra
-			// machinery: with no loop set those are 0 and 1, which is a plain
-			// scan of the whole buffer.
-			// positional: trig, rate, start, end, resetPos
+			// Phasor wraps between start and end, so a loop needs nothing extra:
+			// unset they are 0 and 1. positional: trig, rate, start, end, resetPos
 			buf_pos = Phasor.kr(
 				t_reset_pos,
 				buf_dur.reciprocal / ControlRate.ir * eff_speed,
@@ -158,28 +128,21 @@ Engine_Graindr : CroneEngine {
 				loop_hi,
 				pos);
 
-			// Phasor only corrects by one period per block, so a reset to a
-			// position outside the loop needs a real modulo to pull it in
+			// Phasor corrects by one period per block, so a reset from outside the
+			// loop needs a real modulo to pull it in
 			pos_sig = Wrap.kr(buf_pos, loop_lo, loop_hi);
 
-			// One playhead, several grain clouds over it. Every stream is
-			// built into the graph, because the graph is static, but a stream
-			// past the current count has its trigger multiplied to zero, and a
-			// GrainBuf with no triggers has no grains to iterate — so an unused
-			// stream costs its empty per-block overhead and nothing more.
+			// One playhead, several grain clouds over it. The graph is static, so
+			// every stream is built; an unused one has its trigger zeroed, and a
+			// GrainBuf with no triggers has no grains to iterate.
 			//
-			// The same gate carries `running`, so a voice at rest computes no
-			// grains at all. Without it every voice would grind through its
-			// full grain load whether or not the envelope was letting any of it
-			// out, and eight idle voices would cost the same as eight playing
-			// ones. Grains already in flight still finish, which is why
-			// silencing a voice this way cannot click.
+			// The same gate carries `running`, so a voice at rest computes no grains
+			// at all — otherwise eight idle voices would cost eight playing ones.
+			// Grains in flight still finish, so this cannot click.
 			//
-			// Each stream runs its clock a few percent off its neighbours and
-			// starts it at a different phase, so they never lock into a common
-			// onset grid the way one faster clock would. Jitter and pan are
-			// drawn per stream rather than shared, which is what makes the
-			// cloud diffuse rather than merely denser.
+			// Each stream's clock runs a few percent off its neighbours and starts at
+			// a different phase, so they never lock into a common onset grid. Jitter
+			// and pan are per stream, which is what diffuses the cloud.
 			streams = Array.fill(maxStreams, { arg k;
 				var active = (grains > k) * running;
 				var base = density * (1 + (k * 0.037));
@@ -191,17 +154,15 @@ Engine_Graindr : CroneEngine {
 				var l;
 				var r;
 
-				// A plain Impulse fires on an exact grid, and at low densities
-				// the ear hears that grid as a pulse rather than as texture.
-				// LFNoise0 at the grain rate hands each period its own length,
-				// so onsets land anywhere inside their slot. midiratio rather
-				// than a linear scale, so the period is stretched and squeezed
-				// symmetrically and can never reach zero.
+				// a plain Impulse fires on an exact grid, which at low densities is
+				// audible as a pulse. LFNoise0 gives each period its own length, so
+				// onsets land anywhere in their slot. midiratio, so the period is
+				// scaled symmetrically and never reaches zero.
 				slot = (LFNoise0.kr(base) * scatter * 12).midiratio;
 				trig = Impulse.kr(base * slot, k / maxStreams) * active;
 
-				// grains get their own lengths too. identical overlapping
-				// grains comb-filter against each other; varied ones do not.
+				// grains get their own lengths too: identical overlapping grains
+				// comb-filter against each other, varied ones do not
 				dur = size * (TRand.kr(trig, -1, 1) * scatter * 6).midiratio;
 
 				jitter_sig = TRand.kr(trig,
@@ -209,22 +170,19 @@ Engine_Graindr : CroneEngine {
 					buf_dur.reciprocal * jitter);
 				pan_sig = TRand.kr(trig, spread.neg, spread);
 
-				// cubic interpolation, not linear: every grain of a MIDI note
-				// off the root is a resampled read, and this is where that
-				// shows
+				// cubic, not linear: every grain of a MIDI note off the root is a
+				// resampled read
 				l = GrainBuf.ar(1, trig, dur, buf_l, pitch, pos_sig + jitter_sig, 4);
 				r = GrainBuf.ar(1, trig, dur, buf_r, pitch, pos_sig + jitter_sig, 4);
 				Balance2.ar(l, r, pan + pan_sig);
 			});
 
-			// square root, not 1/n: the streams are uncorrelated, so their sum
-			// grows with the square root of their number rather than linearly
+			// square root, not 1/n: uncorrelated streams sum by the square root
 			sig_mix = Mix(streams) * grains.sqrt.reciprocal;
 
 			Out.ar(out, sig_mix * env * gain);
 			Out.kr(phase_out, pos_sig);
-			// lua fades the playhead on screen and grid with this, so what you
-			// see is the envelope you hear rather than an estimate of it
+			// lua fades the playhead with this, so the display is the real envelope
 			Out.kr(env_out, env);
 		}).add;
 
@@ -255,9 +213,8 @@ Engine_Graindr : CroneEngine {
 
 		pg = ParGroup.head(context.xg);
 
-		// voices are allocated once and never freed. an untriggered voice is
-		// silent and its Phasor is stalled, so it costs nothing but the grain
-		// oscillator ticking over into a closed envelope.
+		// allocated once and never freed. an untriggered voice is silent, its
+		// Phasor stalled and its grain triggers gated off.
 		voices = Array.fill(nvoices, { arg i;
 			Synth.new(\graindr_voice, [
 				\out, mixBus.index,
@@ -286,9 +243,8 @@ Engine_Graindr : CroneEngine {
 			voices[msg[1] - 1].set(\hold, msg[2]);
 		});
 
-		// a negative gate forces EnvGen to release over -1 - gate seconds.
-		// 20ms is short enough to read as a cut and long enough not to click,
-		// and it leaves every envelope able to open again afterwards.
+		// a negative gate force-releases EnvGen over -1 - gate seconds. 20ms reads
+		// as a cut without clicking, and every envelope can open again after.
 		this.addCommand("panic", "i", { arg msg;
 			voices[msg[1] - 1].set(\gate, -1.02, \t_trig, -1.02, \hold, -1.02);
 		});
@@ -297,8 +253,7 @@ Engine_Graindr : CroneEngine {
 			voices[msg[1] - 1].set(\pos, msg[2], \t_reset_pos, 1);
 		});
 
-		// lo and hi are always ordered; dir carries which way round the
-		// gesture was made, and is 1 when there is no loop
+		// lo and hi are ordered; dir carries which way the gesture went
 		this.addCommand("loop", "iffi", { arg msg;
 			voices[msg[1] - 1].set(
 				\loop_lo, msg[2], \loop_hi, msg[3], \loop_dir, msg[4]);
@@ -390,10 +345,8 @@ Engine_Graindr : CroneEngine {
 		this.addCommand("reverb_room", "f", { arg msg; effect.set(\room, msg[1]); });
 		this.addCommand("reverb_damp", "f", { arg msg; effect.set(\damp, msg[1]); });
 
-		// Reads at most bufSeconds, the same ceiling the recorder works to.
-		// Without it the whole file is allocated on the server, so an hour
-		// long recording asks for gigabytes and takes scsynth down with it.
-		// Anything longer loads its first bufSeconds instead of failing.
+		// reads at most bufSeconds, the recorder's ceiling. unbounded, an hour long
+		// file would ask the server for gigabytes. longer files are cut, not refused.
 		this.addCommand("buf_load", "s", { arg msg;
 			var path = msg[1].asString;
 			var file;
@@ -419,8 +372,8 @@ Engine_Graindr : CroneEngine {
 							++ bufSeconds ++ "s").warn;
 					});
 
-					// both reads complete before the old pair is freed, so a
-					// failed read cannot leave a voice pointing at freed memory
+					// both reads complete before the old pair is freed, so a failed
+					// read cannot leave a voice pointing at freed memory
 					Buffer.readChannel(context.server, path, 0, frames, [0], { arg newL;
 						Buffer.readChannel(context.server, path, 0, frames, [srcR], { arg newR;
 							this.swapBuffers(newL, newR);
@@ -435,8 +388,8 @@ Engine_Graindr : CroneEngine {
 
 		this.addCommand("rec_start", "", { arg msg;
 			if(recSynth.notNil, { recSynth.free; recSynth = nil });
-			// reallocate to full length first: a previously loaded short
-			// sample would otherwise cap the recording at its own duration
+			// reallocate to full length first, or a short sample already loaded
+			// would cap the recording at its own duration
 			Routine({
 				var newL = Buffer.alloc(context.server,
 					context.server.sampleRate * bufSeconds, 1);
@@ -449,9 +402,8 @@ Engine_Graindr : CroneEngine {
 			}).play(AppClock);
 		});
 
-		// takes the recorded duration in seconds from lua, so the 60 second
-		// capture buffer can be trimmed down to what was actually recorded.
-		// without this the playheads would scan the unrecorded silence.
+		// lua passes the recorded duration, so the capture buffer can be trimmed.
+		// without it the playheads would scan the unrecorded silence.
 		this.addCommand("rec_stop", "f", { arg msg;
 			var dur = msg[1].asFloat;
 			if(recSynth.notNil, {
@@ -486,8 +438,8 @@ Engine_Graindr : CroneEngine {
 		});
 	}
 
-	// 128 min/max pairs summarising bufL, packed as bytes 0-126 for the
-	// screen. Polls carry a single float, so this goes over custom OSC.
+	// 128 min/max pairs packed as bytes 0-126. polls carry one float, so this
+	// goes over custom OSC.
 	sendWaveform {
 		bufL.loadToFloatArray(action: { arg data;
 			var peak = 0.0;
@@ -497,10 +449,8 @@ Engine_Graindr : CroneEngine {
 			if(data.size < 1, {
 				"Engine_Graindr: empty buffer, no waveform to send".warn;
 			}, {
-				// the display is normalised to the buffer's own peak, so a
-				// quiet or short sample fills the screen rather than drawing
-				// as a thin line through the middle. the floor stops a nearly
-				// silent buffer being amplified into a screenful of noise.
+				// normalised to the buffer's own peak, so a quiet sample fills the
+				// screen. the floor stops near-silence becoming a screen of noise.
 				data.do({ arg samp;
 					var mag = samp.abs;
 					if(mag > peak, { peak = mag });
@@ -510,10 +460,9 @@ Engine_Graindr : CroneEngine {
 				("Engine_Graindr: waveform " ++ data.size ++ " frames, peak "
 					++ peak.round(0.001)).postln;
 
-				// segment bounds are computed from the true fractional width
-				// rather than a truncated integer, so the last columns are not
-				// dropped and a buffer shorter than 128 frames still fills the
-				// display instead of trailing off into unwritten segments
+				// bounds from the true fractional width, not a truncated integer:
+				// the last columns are not dropped, and a buffer under 128 frames
+				// still fills the display
 				128.do({ arg i;
 					var startIdx = (i * data.size / 128).asInteger;
 					var endIdx = ((i + 1) * data.size / 128).asInteger

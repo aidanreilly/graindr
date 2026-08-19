@@ -35,8 +35,7 @@ function Waveform:set_head_pos(head, pos)
   end
 end
 
--- level is the voice's envelope value, 0 to 1. it drives brightness directly,
--- so a head fades out along the release curve and disappears with it.
+-- level is the voice's envelope, 0 to 1, driving brightness directly
 function Waveform:set_head_level(head, level)
   if head >= 1 and head <= self.num_heads then
     self.head_level[head] = level or 0
@@ -73,8 +72,7 @@ function Waveform:draw()
     screen.stroke()
   end
 
-  -- a head is drawn only while its voice is sounding, and its brightness is
-  -- the envelope, so heads appear on the attack and fade away on the release
+  -- drawn only while the voice sounds, at the brightness of its envelope
   for i = 1, self.num_heads do
     local pos = self.head_pos[i]
     local level = math.floor(self.head_level[i] * 15)
